@@ -1,0 +1,225 @@
+// Sheet geometry, shared by the PDF writer and the scan detector.
+// All values are millimetres, origin top-left of the page, y pointing down.
+//
+// A sheet has:
+//  - 4 anchor markers in the page corners. Their IDs encode paper format,
+//    orientation and which corner they are, so a scan can be rectified
+//    before anything else is known.
+//  - a grid of frames with a small marker on every gutter crossing.
+//    These give a local fit per frame, so wavy or bent paper still lines up.
+//  - a QR code (bottom right) carrying everything needed to rebuild the
+//    animation: project id, page number, grid, fps, frame count.
+
+export const LAYOUT_VERSION = 1;
+
+export type PaperId = 'A4' | 'A3' | 'LT';
+
+export const PAPERS: Record<PaperId, { w: number; h: number; name: string }> = {
+  A4: { w: 210, h: 297, name: 'A4' },
+  A3: { w: 297, h: 420, name: 'A3' },
+  LT: { w: 215.9, h: 279.4, name: 'US Letter' },
+};
+const PAPER_ORDER: PaperId[] = ['A4', 'A3', 'LT'];
+
+export const EDGE = 8; // page edge to anchors (printers can't print right up to the edge)
+export const ANCHOR = 10; // anchor marker size
+export const GUTTER = 8; // space between frames, holds the grid markers
+export const MARKER = 6; // grid marker size
+export const QR_SIZE = 18;
+export const BAND_GAP = 3; // space between header/footer bands and the grid
+
+export const ANCHOR_ID_BASE = 200;
+export const MAX_GRID_MARKERS = ANCHOR_ID_BASE;
+
+export interface SheetSpec {
+  paper: PaperId;
+  landscape: boolean;
+  cols: number;
+  rows: number;
+  /** frame width / height */
+  aspect: number;
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface MarkerPlace {
+  id: number;
+  /** top-left corner */
+  x: number;
+  y: number;
+  size: number;
+}
+
+export interface Layout {
+  spec: SheetSpec;
+  pageW: number;
+  pageH: number;
+  /** row-major, cols * rows */
+  cells: Rect[];
+  cellW: number;
+  cellH: number;
+  gridMarkers: MarkerPlace[];
+  anchors: MarkerPlace[];
+  qr: Rect;
+  header: Rect;
+  footer: Rect;
+}
+
+export type Corner = 0 | 1 | 2 | 3; // TL, TR, BR, BL
+
+export function anchorId(paper: PaperId, landscape: boolean, corner: Corner): number {
+  return ANCHOR_ID_BASE + PAPER_ORDER.indexOf(paper) * 8 + (landscape ? 4 : 0) + corner;
+}
+
+export function parseAnchorId(id: number): { paper: PaperId; landscape: boolean; corner: Corner } | null {
+  const n = id - ANCHOR_ID_BASE;
+  if (n < 0 || n >= PAPER_ORDER.length * 8) return null;
+  return {
+    paper: PAPER_ORDER[Math.floor(n / 8)],
+    landscape: (n & 4) !== 0,
+    corner: (n & 3) as Corner,
+  };
+}
+
+export function pageSize(paper: PaperId, landscape: boolean): { w: number; h: number } {
+  const p = PAPERS[paper];
+  return landscape ? { w: p.h, h: p.w } : { w: p.w, h: p.h };
+}
+
+/** QR position only depends on the paper, so it can be found before the grid is known. */
+export function qrRect(paper: PaperId, landscape: boolean): Rect {
+  const { w, h } = pageSize(paper, landscape);
+  return { x: w - EDGE - ANCHOR - BAND_GAP - QR_SIZE, y: h - EDGE - QR_SIZE, w: QR_SIZE, h: QR_SIZE };
+}
+
+/** Space left for the frame grid (including the outer gutter ring). */
+export function gridArea(paper: PaperId, landscape: boolean): Rect {
+  const { w, h } = pageSize(paper, landscape);
+  const top = EDGE + ANCHOR + BAND_GAP;
+  const bottom = h - EDGE - QR_SIZE - BAND_GAP;
+  return { x: EDGE, y: top, w: w - 2 * EDGE, h: bottom - top };
+}
+
+/** Largest frame size (mm) for a grid, keeping the frame aspect ratio. */
+export function cellSize(spec: SheetSpec): { w: number; h: number } {
+  const area = gridArea(spec.paper, spec.landscape);
+  const maxW = (area.w - (spec.cols + 1) * GUTTER) / spec.cols;
+  const maxH = (area.h - (spec.rows + 1) * GUTTER) / spec.rows;
+  return maxW / maxH > spec.aspect
+    ? { w: maxH * spec.aspect, h: maxH }
+    : { w: maxW, h: maxW / spec.aspect };
+}
+
+export function validateSpec(spec: SheetSpec): string | null {
+  if (!PAPERS[spec.paper]) return `unknown paper ${spec.paper}`;
+  if (!(spec.cols >= 1 && spec.rows >= 1)) return 'grid needs at least 1×1';
+  if (!(spec.aspect > 0.1 && spec.aspect < 10)) return 'odd aspect ratio';
+  const c = cellSize(spec);
+  if (c.w < 12 || c.h < 12) return 'frames would be smaller than 12 mm';
+  if ((spec.cols + 1) * (spec.rows + 1) > MAX_GRID_MARKERS) return 'grid too large';
+  return null;
+}
+
+export function computeLayout(spec: SheetSpec): Layout {
+  const err = validateSpec(spec);
+  if (err) throw new Error(err);
+  const { w: W, h: H } = pageSize(spec.paper, spec.landscape);
+  const area = gridArea(spec.paper, spec.landscape);
+  const { w: cw, h: ch } = cellSize(spec);
+  const G = GUTTER;
+
+  const gridW = spec.cols * cw + (spec.cols + 1) * G;
+  const gridH = spec.rows * ch + (spec.rows + 1) * G;
+  const gx = area.x + (area.w - gridW) / 2;
+  const gy = area.y + (area.h - gridH) / 2;
+
+  const cells: Rect[] = [];
+  for (let r = 0; r < spec.rows; r++)
+    for (let c = 0; c < spec.cols; c++)
+      cells.push({ x: gx + G + c * (cw + G), y: gy + G + r * (ch + G), w: cw, h: ch });
+
+  const gridMarkers = gridMarkerPlaces(spec, gx, gy, cw, ch);
+
+  const A = ANCHOR;
+  const anchorPos: [number, number][] = [
+    [EDGE, EDGE],
+    [W - EDGE - A, EDGE],
+    [W - EDGE - A, H - EDGE - A],
+    [EDGE, H - EDGE - A],
+  ];
+  const anchors = anchorPos.map(([x, y], corner) => ({
+    id: anchorId(spec.paper, spec.landscape, corner as Corner),
+    x,
+    y,
+    size: A,
+  }));
+
+  const qr = qrRect(spec.paper, spec.landscape);
+  const header = { x: EDGE + A + BAND_GAP, y: EDGE, w: W - 2 * (EDGE + A + BAND_GAP), h: A };
+  const footer = { x: EDGE + A + BAND_GAP, y: H - EDGE - A, w: qr.x - BAND_GAP - (EDGE + A + BAND_GAP), h: A };
+
+  return { spec, pageW: W, pageH: H, cells, cellW: cw, cellH: ch, gridMarkers, anchors, qr, header, footer };
+}
+
+/**
+ * Grid markers: first one on every gutter crossing (id = r * (cols + 1) + c),
+ * then one halfway along every gutter segment if the frames are big enough
+ * and the IDs suffice. The extra ones let the detector follow paper that
+ * waves inside a frame.
+ */
+function gridMarkerPlaces(spec: SheetSpec, gx: number, gy: number, cw: number, ch: number): MarkerPlace[] {
+  const G = GUTTER;
+  const mids = midMarkers(spec);
+  const out: MarkerPlace[] = [];
+  const at = (cx: number, cy: number) =>
+    out.push({ id: out.length, x: cx - MARKER / 2, y: cy - MARKER / 2, size: MARKER });
+  const X = (c: number) => gx + G / 2 + c * (cw + G);
+  const Y = (r: number) => gy + G / 2 + r * (ch + G);
+  for (let r = 0; r <= spec.rows; r++) for (let c = 0; c <= spec.cols; c++) at(X(c), Y(r));
+  if (mids.h) for (let r = 0; r <= spec.rows; r++) for (let c = 0; c < spec.cols; c++) at(X(c + 0.5), Y(r));
+  if (mids.v) for (let r = 0; r < spec.rows; r++) for (let c = 0; c <= spec.cols; c++) at(X(c), Y(r + 0.5));
+  return out;
+}
+
+function midMarkers(spec: SheetSpec): { h: boolean; v: boolean } {
+  const c = cellSize(spec);
+  const crossings = (spec.cols + 1) * (spec.rows + 1);
+  const h = c.w >= 3 * MARKER;
+  const v = c.h >= 3 * MARKER;
+  const total = crossings + (h ? spec.cols * (spec.rows + 1) : 0) + (v ? (spec.cols + 1) * spec.rows : 0);
+  return total <= MAX_GRID_MARKERS ? { h, v } : { h: false, v: false };
+}
+
+/** Marker corners in mm, in ArUco order: TL, TR, BR, BL. */
+export function markerCorners(m: MarkerPlace): [number, number][] {
+  return [
+    [m.x, m.y],
+    [m.x + m.size, m.y],
+    [m.x + m.size, m.y + m.size],
+    [m.x, m.y + m.size],
+  ];
+}
+
+/** Suggests a grid for a paper format so frames stay a useful size. */
+export function suggestGrid(paper: PaperId, landscape: boolean, aspect: number, minFrameWidth = 45): { cols: number; rows: number } {
+  const area = gridArea(paper, landscape);
+  let best = { cols: 1, rows: 1, n: 1 };
+  for (let cols = 1; cols <= 10; cols++)
+    for (let rows = 1; rows <= 15; rows++) {
+      const spec = { paper, landscape, cols, rows, aspect };
+      if (validateSpec(spec)) continue;
+      const c = cellSize(spec);
+      if (c.w < minFrameWidth) continue;
+      // the grid must actually be filled: no more than one gutter of slack per axis
+      const usedW = cols * c.w + (cols + 1) * GUTTER;
+      const usedH = rows * c.h + (rows + 1) * GUTTER;
+      if (area.w - usedW > c.w || area.h - usedH > c.h) continue;
+      if (cols * rows > best.n) best = { cols, rows, n: cols * rows };
+    }
+  return { cols: best.cols, rows: best.rows };
+}

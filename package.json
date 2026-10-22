@@ -1,0 +1,26 @@
+{
+  "name": "rotopaper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mixed media animation: video to printable sheets and back. Runs fully in the browser.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5180",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "lab": "node scripts/lab.ts"
+  },
+  "dependencies": {
+    "@techstark/opencv-js": "^5.0.0-release.1",
+    "jsqr": "^1.4.0",
+    "pdf-lib": "^1.17.1",
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "fast-png": "^8.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}
