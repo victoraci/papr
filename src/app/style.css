@@ -4,6 +4,7 @@
   --muted: #8a8a8a;
   --surface: #1b1b1b;
   --surface-hover: #262626;
+  --surface-on: #333;
   --warn: #e0a96d;
   --gap: clamp(24px, 3vw, 44px);
   color-scheme: dark;
@@ -25,7 +26,7 @@ body {
 }
 
 main {
-  max-width: 760px;
+  max-width: 1080px;
   padding: calc(var(--gap) * 1.2) var(--gap) calc(var(--gap) * 2);
 }
 
@@ -37,6 +38,10 @@ p {
   font-weight: 400;
 }
 
+p:empty {
+  display: none;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -45,15 +50,98 @@ p {
   color: var(--warn);
 }
 
+/* --- header --- */
+
 header {
-  margin-bottom: calc(var(--gap) * 1.6);
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  margin-bottom: calc(var(--gap) * 1.8);
 }
+
+.logo svg {
+  display: block;
+  width: 132px;
+  height: auto;
+  color: var(--text);
+}
+
+.by {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.by:hover {
+  color: var(--text);
+}
+
+.kauzal svg {
+  display: block;
+  height: 9px;
+  width: auto;
+}
+
+.intro {
+  max-width: 34em;
+  margin-top: 14px;
+}
+
+/* --- sections --- */
 
 section {
   display: grid;
   gap: 18px;
   margin-bottom: calc(var(--gap) * 2);
 }
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.setup {
+  display: grid;
+  grid-template-columns: minmax(0, 400px) minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+  margin-top: 8px;
+}
+
+.controls {
+  display: grid;
+  gap: 18px;
+}
+
+.preview {
+  position: sticky;
+  top: var(--gap);
+}
+
+.sheet svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: calc(100vh - 2 * var(--gap));
+  border-radius: 2px;
+}
+
+@media (max-width: 860px) {
+  .setup {
+    grid-template-columns: 1fr;
+  }
+  .preview {
+    position: static;
+  }
+}
+
+/* --- controls --- */
 
 button,
 .button {
@@ -73,10 +161,13 @@ button:hover,
   background: var(--surface-hover);
 }
 
-button.primary,
-.button.primary {
+button.primary {
   background: var(--text);
   color: var(--bg);
+}
+
+button.primary:hover {
+  background: #fff;
 }
 
 button:disabled {
@@ -84,17 +175,10 @@ button:disabled {
   cursor: default;
 }
 
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 16px;
-}
-
 .settings {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 10px 20px;
+  gap: 12px 20px;
   align-items: center;
 }
 
@@ -107,16 +191,92 @@ button:disabled {
 
 select,
 input[type='number'] {
-  padding: 6px 8px;
+  height: 34px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
   font: inherit;
 }
 
+select {
+  padding-right: 6px;
+}
+
 input[type='number'] {
   width: 5.5em;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.segmented button {
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.segmented button:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.segmented button.on {
+  background: var(--surface-on);
+  color: var(--text);
+}
+
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border-radius: 10px;
+  background: var(--surface-on);
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.switch[aria-checked='true'] {
+  background: var(--text);
+}
+
+.switch[aria-checked='true']::after {
+  background: var(--bg);
+  transform: translateX(16px);
+}
+
+.switch:hover {
+  background: #3d3d3d;
+}
+
+.switch[aria-checked='true']:hover {
+  background: #fff;
 }
 
 video,
@@ -128,6 +288,10 @@ canvas {
   background: #000;
 }
 
+.controls video {
+  max-height: 220px;
+}
+
 canvas {
   cursor: pointer;
 }
@@ -135,6 +299,10 @@ canvas {
 .scans {
   display: grid;
   gap: 4px;
+}
+
+.scans:empty {
+  display: none;
 }
 
 .scans > div {

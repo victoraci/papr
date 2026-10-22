@@ -107,7 +107,6 @@ export async function detectPage(img: RGBAImage, opts: DetectOptions = {}): Prom
       warnings.push('no markers found');
       return result;
     }
-    result.pxPerMm = estimatePxPerMm(markers);
 
     // --- format from anchors, rough page fit, QR ---
     const anchors = markers
@@ -119,12 +118,14 @@ export async function detectPage(img: RGBAImage, opts: DetectOptions = {}): Prom
     if (format) {
       const fmtAnchors = anchors.filter((x) => x.a.paper === format.paper && x.a.landscape === format.landscape);
       const places = anchorPlaces(format.paper, format.landscape);
-      const rough = fitHomography(
-        cv,
-        fmtAnchors.map((x) => ({ mm: markerCorners(places[x.a.corner]), px: x.m.corners })),
-        0,
-      );
-      if (rough) payload = readQrRectified(cv, gray, rough, qrRect(format.paper, format.landscape));
+      const corr = (xs: typeof fmtAnchors) => xs.map((x) => ({ mm: markerCorners(places[x.a.corner]), px: x.m.corners }));
+      // whole page first; on wavy paper the anchor right next to the code follows it better
+      const fits = [fitHomography(cv, corr(fmtAnchors), 0), fitHomography(cv, corr(fmtAnchors.filter((x) => x.a.corner === 2)), 0)];
+      const qrArea = qrRect(format.paper, format.landscape);
+      for (const fit of fits) {
+        if (fit) payload = readQrRectified(cv, gray, fit, qrArea);
+        if (payload) break;
+      }
     }
     if (!payload) payload = readQrAnywhere(img);
     lap('qr');
@@ -144,6 +145,11 @@ export async function detectPage(img: RGBAImage, opts: DetectOptions = {}): Prom
     // --- full page fit ---
     const layout = computeLayout(payload.spec);
     const known = matchToLayout(markers, layout);
+    if (!known.length) {
+      warnings.push('no markers of this sheet found');
+      return result;
+    }
+    result.pxPerMm = estimatePxPerMm(known);
     const thr = 6 * result.pxPerMm; // loose: bent paper is allowed, misreads are not
     const global = fitHomography(
       cv,
@@ -241,13 +247,12 @@ function findMarkers(cv: CV, gray: CV): DetectedMarker[] {
   }
 }
 
-function estimatePxPerMm(markers: DetectedMarker[]): number {
+function estimatePxPerMm(known: Known[]): number {
   return median(
-    markers.map((m) => {
-      const side = (dist(m.corners[0], m.corners[1]) + dist(m.corners[1], m.corners[2]) + dist(m.corners[2], m.corners[3]) + dist(m.corners[3], m.corners[0])) / 4;
-      const a = parseAnchorId(m.id);
-      // anchors are bigger; their size is fixed regardless of the grid
-      return side / (a ? 10 : 6);
+    known.map(({ marker: m, place }) => {
+      const c = m.corners;
+      const side = (dist(c[0], c[1]) + dist(c[1], c[2]) + dist(c[2], c[3]) + dist(c[3], c[0])) / 4;
+      return side / place.size;
     }),
   );
 }
@@ -264,7 +269,7 @@ function voteFormat(as: { paper: PaperId; landscape: boolean }[]): { paper: Pape
 
 /** Anchor positions don't depend on the grid, so any valid grid gives them. */
 function anchorPlaces(paper: PaperId, landscape: boolean): MarkerPlace[] {
-  return computeLayout({ paper, landscape, cols: 1, rows: 1, aspect: 1.5 }).anchors;
+  return computeLayout({ paper, landscape, cols: 1, rows: 1, aspect: 1, frameW: 30, gap: 8 }).anchors;
 }
 
 interface Corr {

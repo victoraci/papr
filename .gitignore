@@ -3,3 +3,4 @@ dist
 lab-out
 .DS_Store
 .claude
+test/fixtures

@@ -1,13 +1,28 @@
 import '@fontsource-variable/inter';
 import './style.css';
-import { cellSize, PAPERS, suggestGrid, validateSpec, type PaperId, type SheetSpec } from '../core/layout.ts';
-import { newProjectId, framesPerPage } from '../core/payload.ts';
+import kauzalSvg from './assets/kauzal.svg?raw';
+import logoSvg from './assets/rotopaper.svg?raw';
+import {
+  computeLayout,
+  FRAME_MIN,
+  GAP_MAX,
+  GAP_MIN,
+  LAYOUT_VERSION,
+  makeSpec,
+  maxFrameWidth,
+  PAPERS,
+  validateSpec,
+  type PaperId,
+  type SheetSpec,
+} from '../core/layout.ts';
+import { framesPerPage, newProjectId } from '../core/payload.ts';
 import { buildSheetsPdf, pageCount } from '../core/pdf.ts';
 import { exportMp4 } from './export.ts';
+import { renderSheetSvg } from './preview.ts';
 import { missingPages, processScan, type Project, type ScanEntry } from './scans.ts';
 import { frameGrabber, loadVideo, type LoadedVideo } from './video.ts';
 
-// --- tiny DOM helper -------------------------------------------------------
+// --- small DOM helpers -----------------------------------------------------
 
 type Child = Node | string | null | undefined | false;
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -23,6 +38,12 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return e;
 }
 
+function svgSpan(svg: string, cls: string) {
+  const s = el('span', { class: cls });
+  s.innerHTML = svg;
+  return s;
+}
+
 function fileButton(label: string, accept: string, multiple: boolean, onFiles: (files: File[]) => void) {
   const input = el('input', { type: 'file', accept, multiple, hidden: true });
   input.onchange = () => {
@@ -30,182 +51,301 @@ function fileButton(label: string, accept: string, multiple: boolean, onFiles: (
     input.value = '';
   };
   const button = el('button', { class: 'primary', textContent: label, onclick: () => input.click() });
-  return { button, input };
+  return el('div', {}, button, input);
 }
 
-function mb(bytes: number) {
-  return `${(bytes / 1e6).toFixed(1)} MB`;
+function segmented<T extends string>(options: { value: T; label: string }[], get: () => T, set: (v: T) => void) {
+  const wrap = el('div', { class: 'segmented' });
+  const buttons = options.map((o) =>
+    el('button', {
+      textContent: o.label,
+      onclick: () => {
+        set(o.value);
+        sync();
+      },
+    }),
+  );
+  const sync = () => buttons.forEach((b, i) => b.classList.toggle('on', options[i].value === get()));
+  wrap.append(...buttons);
+  sync();
+  return { el: wrap, sync };
 }
+
+function toggle(get: () => boolean, set: (v: boolean) => void, label: string) {
+  const b = el('button', { class: 'switch', role: 'switch', ariaLabel: label });
+  const sync = () => b.setAttribute('aria-checked', String(get()));
+  b.onclick = () => {
+    set(!get());
+    sync();
+  };
+  sync();
+  return { el: b, sync };
+}
+
+function numberInput(get: () => number, set: (v: number) => void, attrs: { min: number; max?: number; step: number }) {
+  const input = el('input', { type: 'number', min: String(attrs.min), step: String(attrs.step) });
+  if (attrs.max !== undefined) input.max = String(attrs.max);
+  const sync = () => {
+    if (document.activeElement !== input) input.value = String(+get().toFixed(2));
+  };
+  input.oninput = () => {
+    const v = Number(input.value);
+    if (input.value !== '' && Number.isFinite(v)) set(v);
+  };
+  input.onblur = sync;
+  sync();
+  return { el: input, sync };
+}
+
+const unit = (text: string) => el('span', { class: 'muted', textContent: text });
+const mb = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`;
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 // --- 1. video → sheets -----------------------------------------------------
+
+const ASPECTS: { value: string; label: string; ratio: number }[] = [
+  { value: '16:9', label: '16:9', ratio: 16 / 9 },
+  { value: '4:3', label: '4:3', ratio: 4 / 3 },
+  { value: '1:1', label: '1:1', ratio: 1 },
+  { value: '4:5', label: '4:5', ratio: 4 / 5 },
+  { value: '9:16', label: '9:16', ratio: 9 / 16 },
+  { value: '2.39:1', label: '2.39:1', ratio: 2.39 },
+];
 
 const state = {
   video: null as LoadedVideo | null,
   paper: 'A4' as PaperId,
   landscape: true,
-  cols: 3,
-  rows: 3,
+  aspect: 'original',
+  frameW: 74,
+  gap: 8,
   fps: 12,
   start: 0,
   end: 0,
+  text: true,
+  borders: false,
+  projectId: newProjectId(),
   pdfUrl: '',
 };
 
-const videoPick = fileButton('Choose video', 'video/*', false, (f) => void openVideo(f[0]));
-const videoInfo = el('p', { class: 'muted' });
-const videoPreview = el('video', { controls: true, muted: true, loop: true, playsInline: true, hidden: true });
+function aspectRatio(): number {
+  const v = state.video;
+  if (state.aspect === 'original' || !v) return v ? v.width / v.height : 16 / 9;
+  return ASPECTS.find((a) => a.value === state.aspect)!.ratio;
+}
 
-const paperSel = el('select', {}, ...Object.entries(PAPERS).map(([id, p]) => el('option', { value: id, textContent: p.name })));
-const orientSel = el('select', {}, el('option', { value: 'L', textContent: 'Landscape' }), el('option', { value: 'P', textContent: 'Portrait' }));
-const colsIn = el('input', { type: 'number', min: '1', max: '10', step: '1' });
-const rowsIn = el('input', { type: 'number', min: '1', max: '15', step: '1' });
-const fpsIn = el('input', { type: 'number', min: '1', max: '60', step: '1' });
-const startIn = el('input', { type: 'number', min: '0', step: '0.1' });
-const endIn = el('input', { type: 'number', min: '0', step: '0.1' });
-const settings = el(
-  'div',
-  { class: 'settings', hidden: true },
-  el('span', { class: 'muted', textContent: 'Paper' }),
-  el('div', {}, paperSel, orientSel),
-  el('span', { class: 'muted', textContent: 'Frames per sheet' }),
-  el('div', {}, colsIn, el('span', { class: 'muted', textContent: '×' }), rowsIn),
-  el('span', { class: 'muted', textContent: 'Frame rate' }),
-  el('div', {}, fpsIn, el('span', { class: 'muted', textContent: 'fps' })),
-  el('span', { class: 'muted', textContent: 'Section' }),
-  el('div', {}, startIn, el('span', { class: 'muted', textContent: 'to' }), endIn, el('span', { class: 'muted', textContent: 's' })),
-);
-const summary = el('p', { class: 'muted' });
-const makePdf = el('button', { class: 'primary', textContent: 'Create PDF', hidden: true });
-const pdfStatus = el('p', { class: 'muted' });
-const pdfLink = el('a', { class: 'button', hidden: true });
+function spec(): SheetSpec {
+  return makeSpec(state.paper, state.landscape, aspectRatio(), state.frameW, state.gap);
+}
 
 function frameCount() {
   return Math.max(1, Math.floor((state.end - state.start) * state.fps + 1e-6));
 }
 
-function spec(): SheetSpec | null {
-  const v = state.video;
-  if (!v) return null;
-  return { paper: state.paper, landscape: state.landscape, cols: state.cols, rows: state.rows, aspect: v.width / v.height };
-}
-
-function syncInputs() {
-  paperSel.value = state.paper;
-  orientSel.value = state.landscape ? 'L' : 'P';
-  colsIn.value = String(state.cols);
-  rowsIn.value = String(state.rows);
-  fpsIn.value = String(state.fps);
-  startIn.value = String(+state.start.toFixed(2));
-  endIn.value = String(+state.end.toFixed(2));
-}
-
-function updateSummary() {
-  const s = spec();
-  if (!s) return;
-  const err = validateSpec(s);
-  if (err) {
-    summary.textContent = err.charAt(0).toUpperCase() + err.slice(1) + '.';
-    summary.className = 'warn';
-    makePdf.disabled = true;
-    return;
+/** Biggest frame width that still gives at least 9 frames per sheet. */
+function defaultFrameWidth(): number {
+  const max = maxFrameWidth(state.paper, state.landscape, aspectRatio(), state.gap);
+  for (let w = max; w > FRAME_MIN; w--) {
+    const s = makeSpec(state.paper, state.landscape, aspectRatio(), w, state.gap);
+    if (s.cols * s.rows >= 9) return w;
   }
-  const n = frameCount();
-  const c = cellSize(s);
-  const pages = pageCount(s, n);
-  summary.className = 'muted';
-  summary.textContent = `${n} frames on ${pages} ${pages === 1 ? 'sheet' : 'sheets'}, each frame ${Math.round(c.w)} × ${Math.round(c.h)} mm.`;
-  makePdf.disabled = !(state.end > state.start);
+  return max;
 }
 
-function suggest() {
-  const v = state.video;
-  if (!v) return;
-  const g = suggestGrid(state.paper, state.landscape, v.width / v.height, 60);
-  state.cols = g.cols;
-  state.rows = g.rows;
+function aspectName(r: number): string {
+  const near = ASPECTS.find((a) => Math.abs(a.ratio - r) < 0.01);
+  return near ? near.label : `${r.toFixed(2)}:1`;
 }
+
+const videoPick = fileButton('Choose video', 'video/*', false, (f) => void openVideo(f[0]));
+const videoInfo = el('p', { class: 'muted' });
+const videoPlayer = el('video', { controls: true, muted: true, loop: true, playsInline: true });
+
+const paperCtl = segmented(
+  (Object.keys(PAPERS) as PaperId[]).map((id) => ({ value: id, label: PAPERS[id].name })),
+  () => state.paper,
+  (v) => {
+    state.paper = v;
+    state.frameW = defaultFrameWidth();
+    update();
+  },
+);
+const orientCtl = segmented(
+  [
+    { value: 'P', label: 'Portrait' },
+    { value: 'L', label: 'Landscape' },
+  ],
+  () => (state.landscape ? 'L' : 'P'),
+  (v) => {
+    state.landscape = v === 'L';
+    state.frameW = defaultFrameWidth();
+    update();
+  },
+);
+const aspectSel = el('select');
+aspectSel.onchange = () => {
+  state.aspect = aspectSel.value;
+  state.frameW = defaultFrameWidth();
+  update();
+};
+const frameWIn = numberInput(() => state.frameW, (v) => ((state.frameW = v), update()), { min: FRAME_MIN, step: 1 });
+const gapIn = numberInput(() => state.gap, (v) => ((state.gap = v), update()), { min: GAP_MIN, max: GAP_MAX, step: 0.5 });
+const fpsIn = numberInput(() => state.fps, (v) => ((state.fps = v), update()), { min: 1, max: 60, step: 1 });
+const startIn = numberInput(() => state.start, (v) => ((state.start = v), update()), { min: 0, step: 0.1 });
+const endIn = numberInput(() => state.end, (v) => ((state.end = v), update()), { min: 0, step: 0.1 });
+const textCtl = toggle(() => state.text, (v) => ((state.text = v), update()), 'Text');
+const bordersCtl = toggle(() => state.borders, (v) => ((state.borders = v), update()), 'Frame borders');
+
+const row = (label: string, ...controls: Child[]) => [
+  el('span', { class: 'muted', textContent: label }),
+  el('div', {}, ...controls),
+];
+const settings = el(
+  'div',
+  { class: 'settings' },
+  ...row('Paper', paperCtl.el),
+  ...row('Orientation', orientCtl.el),
+  ...row('Aspect ratio', aspectSel),
+  ...row('Frame width', frameWIn.el, unit('mm')),
+  ...row('Spacing', gapIn.el, unit('mm')),
+  ...row('Frame rate', fpsIn.el, unit('fps')),
+  ...row('Section', startIn.el, unit('to'), endIn.el, unit('s')),
+  ...row('Text', textCtl.el),
+  ...row('Frame borders', bordersCtl.el),
+);
+const summary = el('p', { class: 'muted' });
+const makePdf = el('button', { class: 'primary', textContent: 'Create PDF' });
+const pdfLink = el('a', { class: 'button', hidden: true });
+const pdfNote = el('p', { class: 'muted' });
+const sheetPreview = el('div', { class: 'sheet' });
+
+const setup = el(
+  'div',
+  { class: 'setup', hidden: true },
+  el('div', { class: 'controls' }, videoPlayer, settings, summary, el('div', { class: 'row' }, makePdf, pdfLink), pdfNote),
+  el('div', { class: 'preview' }, sheetPreview),
+);
 
 async function openVideo(file: File) {
   videoInfo.className = 'muted';
   videoInfo.textContent = 'Opening…';
   try {
-    if (state.video) URL.revokeObjectURL(state.video.url);
     const v = await loadVideo(file);
+    if (state.video) URL.revokeObjectURL(state.video.url);
     state.video = v;
     state.start = 0;
-    state.end = v.duration;
+    state.end = +v.duration.toFixed(2);
+    state.aspect = 'original';
     state.landscape = v.width >= v.height;
-    suggest();
-    syncInputs();
+    state.frameW = defaultFrameWidth();
+    aspectSel.replaceChildren(
+      el('option', { value: 'original', textContent: `Original (${aspectName(v.width / v.height)})` }),
+      ...ASPECTS.map((a) => el('option', { value: a.value, textContent: a.label })),
+    );
     videoInfo.textContent = `${file.name} · ${v.duration.toFixed(1)} s · ${v.width} × ${v.height}`;
-    videoPreview.src = v.url;
-    videoPreview.hidden = false;
-    settings.hidden = false;
-    makePdf.hidden = false;
+    videoPlayer.src = v.url;
+    setup.hidden = false;
     pdfLink.hidden = true;
-    pdfStatus.textContent = '';
-    updateSummary();
+    pdfNote.textContent = '';
+    thumbs.clear();
+    update();
   } catch (e) {
     videoInfo.className = 'warn';
     videoInfo.textContent = e instanceof Error ? e.message : String(e);
   }
 }
 
-paperSel.onchange = () => {
-  state.paper = paperSel.value as PaperId;
-  suggest();
-  syncInputs();
-  updateSummary();
-};
-orientSel.onchange = () => {
-  state.landscape = orientSel.value === 'L';
-  suggest();
-  syncInputs();
-  updateSummary();
-};
-const num = (input: HTMLInputElement, key: 'cols' | 'rows' | 'fps' | 'start' | 'end', int: boolean) => {
-  input.oninput = () => {
-    const v = Number(input.value);
-    if (!Number.isFinite(v)) return;
-    state[key] = int ? Math.round(v) : v;
-    if (state.video) state.end = Math.min(state.end, state.video.duration);
-    updateSummary();
+function update() {
+  const v = state.video;
+  if (!v) return;
+  state.end = Math.min(state.end, +v.duration.toFixed(2));
+  for (const c of [paperCtl, orientCtl, frameWIn, gapIn, fpsIn, startIn, endIn, textCtl, bordersCtl]) c.sync();
+  aspectSel.value = state.aspect;
+  frameWIn.el.max = String(maxFrameWidth(state.paper, state.landscape, aspectRatio(), state.gap));
+
+  const s = spec();
+  const err = validateSpec(s) ?? (state.end > state.start ? null : 'The section is empty.');
+  if (err) {
+    summary.className = 'warn';
+    summary.textContent = err;
+    makePdf.disabled = true;
+    return;
+  }
+  const n = frameCount();
+  summary.className = 'muted';
+  summary.textContent = `${plural(n, 'frame', 'frames')} · ${framesPerPage(s)} per sheet · ${plural(pageCount(s, n), 'sheet', 'sheets')}`;
+  makePdf.disabled = false;
+  void renderPreview();
+}
+
+// sheet preview with real frames, fetched in the background
+const thumbs = new Map<string, string>();
+let previewRun = 0;
+
+const thumbKey = (i: number) => `${state.start}|${state.fps}|${aspectRatio().toFixed(4)}|${i}`;
+
+async function renderPreview() {
+  const run = ++previewRun;
+  const s = spec();
+  const layout = computeLayout(s);
+  const n = frameCount();
+  const draw = async () => {
+    const svg = await renderSheetSvg(
+      layout,
+      { version: LAYOUT_VERSION, projectId: state.projectId, page: 1, pages: pageCount(s, n), spec: s, fps: state.fps, frameCount: n },
+      { text: state.text, borders: state.borders },
+      state.video?.file.name,
+      (i) => thumbs.get(thumbKey(i)),
+    );
+    if (run === previewRun) sheetPreview.replaceChildren(svg);
   };
-};
-num(colsIn, 'cols', true);
-num(rowsIn, 'rows', true);
-num(fpsIn, 'fps', false);
-num(startIn, 'start', false);
-num(endIn, 'end', false);
+  await draw();
+
+  const wanted = Math.min(framesPerPage(s), n, 60);
+  const missing = [...Array(wanted).keys()].filter((i) => !thumbs.has(thumbKey(i)));
+  if (!missing.length || !state.video) return;
+  await new Promise((r) => setTimeout(r, 250)); // settle while the user is still typing
+  if (run !== previewRun) return;
+  const grab = await frameGrabber(state.video, state.start, state.fps, aspectRatio(), 240);
+  for (const i of missing) {
+    if (run !== previewRun) return;
+    thumbs.set(thumbKey(i), await grab.dataUrl(i));
+  }
+  await draw();
+}
 
 makePdf.onclick = async () => {
   const v = state.video;
   const s = spec();
-  if (!v || !s || validateSpec(s)) return;
+  if (!v || validateSpec(s)) return;
   makePdf.disabled = true;
   pdfLink.hidden = true;
   const n = frameCount();
-  const id = newProjectId();
+  const id = state.projectId;
   try {
+    // ~300 dpi on paper
+    const grab = await frameGrabber(v, state.start, state.fps, s.aspect, (s.frameW / 25.4) * 300);
     const bytes = await buildSheetsPdf({
       spec: s,
+      style: { text: state.text, borders: state.borders },
       projectId: id,
       fps: state.fps,
       frameCount: n,
       title: v.file.name,
-      getFrame: frameGrabber(v, state.start, state.fps, cellSize(s).w),
-      onProgress: (done, total) => (pdfStatus.textContent = `Frame ${done} of ${total}`),
+      getFrame: (i) => grab.jpeg(i),
+      onProgress: (done, total) => (pdfNote.textContent = `Frame ${done} of ${total}`),
     });
     if (state.pdfUrl) URL.revokeObjectURL(state.pdfUrl);
     state.pdfUrl = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/pdf' }));
-    const pages = pageCount(s, n);
     pdfLink.href = state.pdfUrl;
     pdfLink.download = `rotopaper-${id}.pdf`;
-    pdfLink.textContent = `Download PDF · ${pages} ${pages === 1 ? 'sheet' : 'sheets'} · ${mb(bytes.length)}`;
+    pdfLink.textContent = `Download PDF · ${mb(bytes.length)}`;
     pdfLink.hidden = false;
-    pdfStatus.textContent = `Print at 100 % or “fit to page”, both work. Keep the black squares and the QR code clean.`;
+    pdfNote.textContent = 'Print at 100 % or fit to page. Don’t paint over the black squares or the QR code.';
+    // the next PDF is a new project, so sheets of both can't get mixed up
+    state.projectId = newProjectId();
   } catch (e) {
-    pdfStatus.textContent = e instanceof Error ? e.message : String(e);
+    pdfNote.textContent = e instanceof Error ? e.message : String(e);
   } finally {
     makePdf.disabled = false;
   }
@@ -216,7 +356,7 @@ makePdf.onclick = async () => {
 const scans: ScanEntry[] = [];
 const projects = new Map<string, Project>();
 
-const scanPick = fileButton('Add scans', 'image/*', true, (f) => void addScans(f));
+const scanPick = fileButton('Add scans', 'image/*', true, (f) => addScans(f));
 const scanList = el('div', { class: 'scans' });
 const projectInfo = el('p', { class: 'muted' });
 const player = el('canvas', { hidden: true, title: 'Click to pause' });
@@ -251,15 +391,12 @@ function renderScans() {
       const r = s.result;
       let text = '';
       let cls = 'muted';
-      if (s.status === 'waiting') text = 'waiting';
-      else if (s.status === 'working') text = projects.size || scans.indexOf(s) > 0 ? 'reading…' : 'loading the detector, then reading…';
+      if (s.status === 'waiting') text = 'Waiting';
+      else if (s.status === 'working') text = 'Reading…';
       else if (s.status === 'failed') {
-        text = s.error ?? 'not recognised';
+        text = s.error ?? 'Not recognised';
         cls = 'warn';
-      } else if (r?.payload) {
-        text = `sheet ${r.payload.page} of ${r.payload.pages} · ${r.frames.length} frames`;
-        if (r.warnings.length) text += ` · ${r.warnings.join(', ')}`;
-      }
+      } else if (r?.payload) text = `Sheet ${r.payload.page} of ${r.payload.pages} · ${plural(r.frames.length, 'frame', 'frames')}`;
       return el('div', {}, el('span', { textContent: s.file.name }), el('span', { className: cls, textContent: text }));
     }),
   );
@@ -267,11 +404,10 @@ function renderScans() {
   const p = currentProject();
   if (!p) return;
   const miss = missingPages(p);
-  const others = projects.size > 1 ? ` · ${projects.size - 1} other project(s) ignored` : '';
   projectInfo.textContent =
     `${p.frames.size} of ${p.payload.frameCount} frames · ${p.payload.fps} fps` +
-    (miss.length ? ` · missing ${miss.length === 1 ? 'sheet' : 'sheets'} ${miss.join(', ')}` : '') +
-    others;
+    (miss.length ? ` · ${miss.length === 1 ? 'sheet' : 'sheets'} ${miss.join(', ')} missing` : '') +
+    (projects.size > 1 ? ` · scans from another project are left out` : '');
   player.hidden = false;
   exportBtn.hidden = false;
   if (player.width !== p.frameW) {
@@ -329,7 +465,7 @@ exportBtn.onclick = async () => {
     mp4Link.download = `rotopaper-${p.id}.mp4`;
     mp4Link.textContent = `Download MP4 · ${mb(blob.size)}`;
     mp4Link.hidden = false;
-    exportStatus.textContent = missingPages(p).length ? 'Missing frames hold the previous frame.' : '';
+    exportStatus.textContent = missingPages(p).length ? 'Missing frames repeat the frame before them.' : '';
   } catch (e) {
     exportStatus.textContent = e instanceof Error ? e.message : String(e);
   } finally {
@@ -343,27 +479,17 @@ document.getElementById('app')!.append(
   el(
     'header',
     {},
-    el('h1', { textContent: 'rotopaper' }),
-    el('p', { class: 'muted', textContent: 'Mixed media animation. Runs in your browser, nothing is uploaded.' }),
+    svgSpan(logoSvg, 'logo'),
+    el('a', { class: 'by', href: 'https://kauzal.com', target: '_blank', rel: 'noopener' }, el('span', { textContent: 'by' }), svgSpan(kauzalSvg, 'kauzal')),
+    el('p', { class: 'muted intro', textContent: 'Turn a video into printable sheets, work on them by hand and scan them back into a video.' }),
   ),
-  el(
-    'section',
-    {},
-    el('h2', { textContent: 'Video to sheets' }),
-    el('p', { class: 'muted', textContent: 'Pick a video and get a PDF with its frames laid out on sheets. Print them and work on them by hand.' }),
-    el('div', { class: 'row' }, videoPick.button, videoPick.input, videoInfo),
-    videoPreview,
-    settings,
-    summary,
-    el('div', { class: 'row' }, makePdf, pdfLink),
-    pdfStatus,
-  ),
+  el('section', {}, el('h2', { textContent: 'Video to sheets' }), el('div', { class: 'row' }, videoPick, videoInfo), setup),
   el(
     'section',
     {},
     el('h2', { textContent: 'Sheets to video' }),
-    el('p', { class: 'muted', textContent: 'Scan or photograph the finished sheets and add them here, in any order.' }),
-    el('div', { class: 'row' }, scanPick.button, scanPick.input),
+    el('p', { class: 'muted', textContent: 'Scan or photograph the sheets and add them here. The order doesn’t matter.' }),
+    scanPick,
     scanList,
     projectInfo,
     player,
@@ -373,6 +499,4 @@ document.getElementById('app')!.append(
 );
 
 // dev hook so the flow can be driven without a file dialog
-if (import.meta.env.DEV) {
-  Object.assign(window, { rotopaper: { openVideo, addScans, state, projects, framesPerPage } });
-}
+if (import.meta.env.DEV) Object.assign(window, { rotopaper: { openVideo, addScans, state } });

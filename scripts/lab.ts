@@ -11,7 +11,7 @@ import { loadCv, type CV } from '../src/core/cv.ts';
 import { detectPage, type PageResult } from '../src/core/detect.ts';
 import { dist, type Pt } from '../src/core/geom.ts';
 import { toRGBA, type RGBAImage } from '../src/core/image.ts';
-import { computeLayout, pageSize, type SheetSpec } from '../src/core/layout.ts';
+import { computeLayout, makeSpec, type PaperId, type SheetSpec } from '../src/core/layout.ts';
 import { buildSheetsPdf, pageCount } from '../src/core/pdf.ts';
 import { fakeScan, placePage, type Scenario } from '../test/fakescan.ts';
 import { makeFrame, readBarcode } from '../test/synth.ts';
@@ -20,7 +20,16 @@ const OUT = 'lab-out';
 const DPI = 300;
 const FPS = 12;
 const N = 30;
-const SPEC: SheetSpec = { paper: 'A4', landscape: true, cols: 3, rows: 3, aspect: 16 / 9 };
+// override with env: PAPER=A5 ORIENT=P FW=40 GAP=7 BORDERS=1
+const SPEC: SheetSpec = makeSpec(
+  (process.env.PAPER ?? 'A4') as PaperId,
+  (process.env.ORIENT ?? 'L') === 'L',
+  16 / 9,
+  Number(process.env.FW ?? 76),
+  Number(process.env.GAP ?? 8),
+);
+const PER = SPEC.cols * SPEC.rows;
+console.log(`sheet ${SPEC.paper} ${SPEC.landscape ? 'landscape' : 'portrait'}, ${SPEC.cols}×${SPEC.rows} frames of ${SPEC.frameW} mm, gap ${SPEC.gap} mm`);
 const filter = process.argv[2] ?? '';
 
 const cv = await loadCv();
@@ -30,6 +39,7 @@ mkdirSync(OUT, { recursive: true });
 // --- sheets ---
 const pdf = await buildSheetsPdf({
   spec: SPEC,
+  style: { text: true, borders: !!process.env.BORDERS },
   projectId: 'LAB001',
   fps: FPS,
   frameCount: N,
@@ -163,12 +173,12 @@ for (const sc of scenarios) {
     const t0 = performance.now();
     const res = await detectPage(scan.image, { frameWidth: 640, smoothing: process.env.SMOOTH ? Number(process.env.SMOOTH) : undefined });
     const ms = Math.round(performance.now() - t0);
-    const expected = Math.min(N - (p - 1) * 9, 9);
+    const expected = Math.min(N - (p - 1) * PER, PER);
 
     // geometric error: 3x3 sample points per frame, in % of frame width
     const errs: number[] = [];
     for (const f of res.frames) {
-      const cell = layout.cells[f.index - (p - 1) * 9];
+      const cell = layout.cells[f.index - (p - 1) * PER];
       const cellPx = dist(scan.mmToPx(cell.x, cell.y), scan.mmToPx(cell.x + cell.w, cell.y));
       for (const fx of [0, 0.5, 1])
         for (const fy of [0, 0.5, 1]) {
@@ -280,4 +290,3 @@ function overlay(cv: CV, img: RGBAImage, res: PageResult, maxW: number): RGBAIma
   return out;
 }
 
-void pageSize;

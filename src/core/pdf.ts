@@ -1,11 +1,10 @@
 // Writes the printable sheets as a vector PDF (markers and QR stay razor sharp,
 // only the frames themselves are images).
 
-import { PDFDocument, StandardFonts, rgb, type PDFPage, type PDFFont } from 'pdf-lib';
-import qrcode from 'qrcode-generator';
-import { ARUCO_4X4_250 } from './aruco-dict.ts';
-import { computeLayout, LAYOUT_VERSION, type MarkerPlace, type Rect, type SheetSpec } from './layout.ts';
-import { encodePayload, framesPerPage } from './payload.ts';
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from 'pdf-lib';
+import { computeLayout, LAYOUT_VERSION, type Rect, type SheetSpec } from './layout.ts';
+import { framesPerPage } from './payload.ts';
+import { drawSheet, type SheetCanvas, type SheetStyle } from './sheet.ts';
 
 export interface FrameImage {
   bytes: Uint8Array;
@@ -14,6 +13,7 @@ export interface FrameImage {
 
 export interface SheetsInput {
   spec: SheetSpec;
+  style: SheetStyle;
   projectId: string;
   fps: number;
   frameCount: number;
@@ -27,6 +27,7 @@ const PT = 72 / 25.4;
 const BLACK = rgb(0, 0, 0);
 const WHITE = rgb(1, 1, 1);
 const GREY = rgb(0.45, 0.45, 0.45);
+const BORDER = rgb(0.15, 0.15, 0.15);
 
 export function pageCount(spec: SheetSpec, frameCount: number): number {
   return Math.max(1, Math.ceil(frameCount / framesPerPage(spec)));
@@ -35,7 +36,6 @@ export function pageCount(spec: SheetSpec, frameCount: number): number {
 export async function buildSheetsPdf(input: SheetsInput): Promise<Uint8Array> {
   const layout = computeLayout(input.spec);
   const pages = pageCount(input.spec, input.frameCount);
-  const perPage = framesPerPage(input.spec);
 
   const doc = await PDFDocument.create();
   doc.setTitle(`rotopaper ${input.projectId}`);
@@ -45,130 +45,69 @@ export async function buildSheetsPdf(input: SheetsInput): Promise<Uint8Array> {
   let done = 0;
   for (let p = 1; p <= pages; p++) {
     const page = doc.addPage([layout.pageW * PT, layout.pageH * PT]);
-    const draw = new Drawer(page, layout.pageH, font);
-    const first = (p - 1) * perPage;
-    const last = Math.min(first + perPage, input.frameCount) - 1;
-
-    for (let i = 0; i < perPage; i++) {
-      const index = first + i;
-      if (index > last) break;
-      const cell = layout.cells[i];
-      const frame = await input.getFrame(index);
-      const img = frame.type === 'jpg' ? await doc.embedJpg(frame.bytes) : await doc.embedPng(frame.bytes);
-      draw.image(img, cell);
-      draw.text(String(index + 1), cell.x + 0.6, cell.y + cell.h + 1.2, 6, GREY);
+    const canvas = new PdfCanvas(page, layout.pageH, font, async (index) => {
+      const f = await input.getFrame(index);
       input.onProgress?.(++done, input.frameCount);
-    }
-
-    for (const m of layout.gridMarkers) draw.marker(m);
-    for (const m of layout.anchors) draw.marker(m);
-
-    const payload = encodePayload({
-      version: LAYOUT_VERSION,
-      projectId: input.projectId,
-      page: p,
-      pages,
-      spec: input.spec,
-      fps: input.fps,
-      frameCount: input.frameCount,
+      return f.type === 'jpg' ? doc.embedJpg(f.bytes) : doc.embedPng(f.bytes);
     });
-    draw.qr(payload, layout.qr);
-
-    const title = input.title ? ` · ${input.title}` : '';
-    draw.text(`rotopaper${title}`, layout.header.x, layout.header.y + 3.2, 8, BLACK);
-    draw.textRight(`${input.projectId} · page ${p} / ${pages}`, layout.header.x + layout.header.w, layout.header.y + 3.2, 8, BLACK);
-    draw.text(
-      `frames ${first + 1}–${last + 1} of ${input.frameCount} · ${+input.fps.toFixed(3)} fps`,
-      layout.footer.x,
-      layout.footer.y + layout.footer.h - 4.6,
-      7,
-      GREY,
-    );
-    draw.text(
-      'Paint freely, but keep the black squares and the QR code clean.',
-      layout.footer.x,
-      layout.footer.y + layout.footer.h - 1.4,
-      7,
-      GREY,
-    );
+    await drawSheet(canvas, {
+      layout,
+      title: input.title,
+      style: input.style,
+      payload: {
+        version: LAYOUT_VERSION,
+        projectId: input.projectId,
+        page: p,
+        pages,
+        spec: input.spec,
+        fps: input.fps,
+        frameCount: input.frameCount,
+      },
+    });
   }
 
   return doc.save();
 }
 
-class Drawer {
+class PdfCanvas implements SheetCanvas {
   private page: PDFPage;
   private pageH: number;
   private font: PDFFont;
+  private embed: (index: number) => Promise<PDFImage>;
 
-  constructor(page: PDFPage, pageH: number, font: PDFFont) {
+  constructor(page: PDFPage, pageH: number, font: PDFFont, embed: (index: number) => Promise<PDFImage>) {
     this.page = page;
     this.pageH = pageH;
     this.font = font;
+    this.embed = embed;
   }
 
-  rect(x: number, y: number, w: number, h: number, color = BLACK) {
-    this.page.drawRectangle({ x: x * PT, y: (this.pageH - y - h) * PT, width: w * PT, height: h * PT, color });
+  private box(r: Rect) {
+    return { x: r.x * PT, y: (this.pageH - r.y - r.h) * PT, width: r.w * PT, height: r.h * PT };
   }
 
-  image(img: Parameters<PDFPage['drawImage']>[0], r: Rect) {
-    this.page.drawImage(img, { x: r.x * PT, y: (this.pageH - r.y - r.h) * PT, width: r.w * PT, height: r.h * PT });
+  fill(r: Rect, white = false) {
+    this.page.drawRectangle({ ...this.box(r), color: white ? WHITE : BLACK });
   }
 
-  /** baseline at y (mm from top) */
-  text(s: string, x: number, y: number, sizePt: number, color = BLACK) {
-    this.page.drawText(latin1(s), { x: x * PT, y: (this.pageH - y) * PT, size: sizePt, font: this.font, color });
+  outline(r: Rect, width: number) {
+    // drawn just outside the frame, so it never eats into the picture
+    const o = width / 2;
+    this.page.drawRectangle({ ...this.box({ x: r.x - o, y: r.y - o, w: r.w + width, h: r.h + width }), borderColor: BORDER, borderWidth: width * PT });
   }
 
-  textRight(s: string, xRight: number, y: number, sizePt: number, color = BLACK) {
-    const w = this.font.widthOfTextAtSize(latin1(s), sizePt) / PT;
-    this.text(s, xRight - w, y, sizePt, color);
+  async frame(index: number, r: Rect) {
+    this.page.drawImage(await this.embed(index), this.box(r));
   }
 
-  /** ArUco 4x4 marker with a 1-module black border, white bits punched out. */
-  marker(m: MarkerPlace) {
-    const code = ARUCO_4X4_250[m.id];
-    const mod = m.size / 6;
-    this.rect(m.x, m.y, m.size, m.size, BLACK);
-    for (let r = 0; r < 4; r++) {
-      let c = 0;
-      while (c < 4) {
-        if (!(code & (1 << (r * 4 + c)))) {
-          c++;
-          continue;
-        }
-        let run = 1;
-        while (c + run < 4 && code & (1 << (r * 4 + c + run))) run++;
-        this.rect(m.x + (c + 1) * mod, m.y + (r + 1) * mod, run * mod, mod, WHITE);
-        c += run;
-      }
-    }
-  }
-
-  qr(text: string, r: Rect) {
-    const q = qrcode(0, 'M');
-    q.addData(text, 'Alphanumeric');
-    q.make();
-    const n = q.getModuleCount();
-    const mod = r.w / n;
-    for (let row = 0; row < n; row++) {
-      let c = 0;
-      while (c < n) {
-        if (!q.isDark(row, c)) {
-          c++;
-          continue;
-        }
-        let run = 1;
-        while (c + run < n && q.isDark(row, c + run)) run++;
-        this.rect(r.x + c * mod, r.y + row * mod, run * mod, mod);
-        c += run;
-      }
-    }
+  text(s: string, x: number, y: number, size: number, opts: { right?: boolean; grey?: boolean } = {}) {
+    const t = latin1(s);
+    const w = opts.right ? this.font.widthOfTextAtSize(t, size) / PT : 0;
+    this.page.drawText(t, { x: (x - w) * PT, y: (this.pageH - y) * PT, size, font: this.font, color: opts.grey ? GREY : BLACK });
   }
 }
 
 /** The built-in PDF font only covers Latin-1; drop anything else (emoji in file names etc.). */
 function latin1(s: string): string {
-  return s.replace(/[^\x20-\x7e\xa0-\xff–·]/g, '');
+  return s.replace(/[^\x20-\x7e\xa0-\xff–·’]/g, '');
 }
-

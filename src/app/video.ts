@@ -4,7 +4,6 @@ import type { FrameImage } from '../core/pdf.ts';
 
 export interface LoadedVideo {
   file: File;
-  el: HTMLVideoElement;
   url: string;
   duration: number;
   width: number;
@@ -13,17 +12,26 @@ export interface LoadedVideo {
 
 export async function loadVideo(file: File): Promise<LoadedVideo> {
   const url = URL.createObjectURL(file);
+  try {
+    const el = await videoElement(url);
+    if (!el.videoWidth || !Number.isFinite(el.duration)) throw new Error('Could not read this video.');
+    return { file, url, duration: el.duration, width: el.videoWidth, height: el.videoHeight };
+  } catch (e) {
+    URL.revokeObjectURL(url);
+    throw e;
+  }
+}
+
+function videoElement(url: string): Promise<HTMLVideoElement> {
   const el = document.createElement('video');
   el.muted = true;
   el.playsInline = true;
   el.preload = 'auto';
   el.src = url;
-  await new Promise<void>((resolve, reject) => {
-    el.onloadeddata = () => resolve();
+  return new Promise((resolve, reject) => {
+    el.onloadeddata = () => resolve(el);
     el.onerror = () => reject(new Error('This video format is not supported by your browser.'));
   });
-  if (!el.videoWidth || !Number.isFinite(el.duration)) throw new Error('Could not read this video.');
-  return { file, el, url, duration: el.duration, width: el.videoWidth, height: el.videoHeight };
 }
 
 function seek(el: HTMLVideoElement, t: number): Promise<void> {
@@ -37,14 +45,24 @@ function seek(el: HTMLVideoElement, t: number): Promise<void> {
   });
 }
 
+/** Centre crop of the video for a target aspect ratio. */
+function crop(v: LoadedVideo, aspect: number) {
+  const va = v.width / v.height;
+  return va > aspect
+    ? { sx: (v.width - v.height * aspect) / 2, sy: 0, sw: v.height * aspect, sh: v.height }
+    : { sx: 0, sy: (v.height - v.width / aspect) / 2, sw: v.width, sh: v.width / aspect };
+}
+
 /**
- * Returns a frame grabber for the PDF writer.
- * Frame i is taken at start + i / fps; sized for printing at ~300 dpi.
+ * Grabs frames in order: frame i is taken at start + i / fps, cropped to the
+ * aspect ratio and scaled to `width` px (never above the video's own size).
+ * Each grabber has its own video element, so several can run side by side.
  */
-export function frameGrabber(video: LoadedVideo, start: number, fps: number, printWidthMm: number) {
-  const maxW = Math.round((printWidthMm / 25.4) * 300);
-  const w = Math.min(video.width, maxW);
-  const h = Math.round((w * video.height) / video.width);
+export async function frameGrabber(v: LoadedVideo, start: number, fps: number, aspect: number, width: number) {
+  const el = await videoElement(v.url);
+  const c = crop(v, aspect);
+  const w = Math.max(2, Math.round(Math.min(width, c.sw)));
+  const h = Math.max(2, Math.round(w / aspect));
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
@@ -52,13 +70,22 @@ export function frameGrabber(video: LoadedVideo, start: number, fps: number, pri
   // a hair past the frame start, so rounding never lands on the previous frame
   const nudge = 0.001;
 
-  return async (i: number): Promise<FrameImage> => {
-    const t = Math.min(start + i / fps + nudge, video.duration - nudge);
-    await seek(video.el, t);
-    ctx.drawImage(video.el, 0, 0, w, h);
-    const blob = await new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('frame encode failed'))), 'image/jpeg', 0.9),
-    );
-    return { bytes: new Uint8Array(await blob.arrayBuffer()), type: 'jpg' };
+  const draw = async (i: number) => {
+    await seek(el, Math.min(start + i / fps + nudge, v.duration - nudge));
+    ctx.drawImage(el, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+  };
+
+  return {
+    async jpeg(i: number, quality = 0.9): Promise<FrameImage> {
+      await draw(i);
+      const blob = await new Promise<Blob>((resolve, reject) =>
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not encode a frame.'))), 'image/jpeg', quality),
+      );
+      return { bytes: new Uint8Array(await blob.arrayBuffer()), type: 'jpg' };
+    },
+    async dataUrl(i: number): Promise<string> {
+      await draw(i);
+      return canvas.toDataURL('image/jpeg', 0.8);
+    },
   };
 }
