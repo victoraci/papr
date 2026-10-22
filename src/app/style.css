@@ -9,7 +9,7 @@
   --line-on: #3a3a3a;
   --stage: #141414;
   --warn: #e0a96d;
-  --top: 64px;
+  --top: 76px;
   color-scheme: dark;
 }
 
@@ -71,22 +71,27 @@ p:empty {
 .brand {
   display: grid;
   justify-items: start;
-  gap: 5px;
+  gap: 7px;
+}
+
+.logo {
+  display: block;
+  color: var(--text);
 }
 
 .logo svg {
   display: block;
-  height: 14px;
+  height: 21px;
   width: auto;
 }
 
 .by {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   color: var(--muted);
   text-decoration: none;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 
@@ -96,7 +101,7 @@ p:empty {
 
 .kauzal svg {
   display: block;
-  height: 7px;
+  height: 8.5px;
   width: auto;
 }
 
@@ -136,6 +141,46 @@ p:empty {
 
 .mode-switch button.on {
   color: var(--text);
+}
+
+/* --- home --- */
+
+.home {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  padding: 24px;
+}
+
+.home-inner {
+  display: grid;
+  gap: 28px;
+  max-width: 560px;
+  margin-bottom: 8vh;
+}
+
+.claim {
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+.how {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.how li {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+}
+
+.small {
+  font-size: 13px;
 }
 
 /* --- panels --- */
