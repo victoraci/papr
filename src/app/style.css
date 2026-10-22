@@ -372,10 +372,15 @@ button.round {
   color: var(--text);
 }
 
+.segmented.grid2,
 .segmented.grid3 {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   justify-self: stretch;
+}
+
+.segmented.grid3 {
+  grid-template-columns: repeat(3, 1fr);
 }
 
 .toggle-row {
@@ -433,7 +438,7 @@ button.round {
 
 .stack {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 input[type='range'] {
@@ -568,6 +573,20 @@ input[type='range']::-moz-range-thumb {
 
 .scans > div > :last-child {
   flex: none;
+}
+
+/* errors are longer: put them under the file name */
+.scans > div.failed {
+  flex-direction: column;
+  gap: 0;
+}
+
+.scans > div.failed > :last-child {
+  flex: initial;
+}
+
+.section-title {
+  margin-top: 14px;
 }
 
 /* --- small screens: stack sidebar over stage --- */

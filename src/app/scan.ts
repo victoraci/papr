@@ -1,27 +1,75 @@
-// Scan panel: scans / photos → animation → MP4.
+// Scan panel: scans / photos / PDFs → animation → MP4 or GIF.
 
-import { exportMp4 } from './export.ts';
-import { missingPages, processScan, type Project, type ScanEntry } from './scans.ts';
-import { dropZone, el, mb } from './ui.ts';
+import { exportGif, exportMp4, type DrawFrame } from './export.ts';
+import { frameSize, missingPages, processScan, toEntries, type Project, type ScanEntry } from './scans.ts';
+import { dropZone, el, mb, segmented, slider } from './ui.ts';
+
+const SIZES = { small: 640, medium: 960, large: 1280 } as const;
+type Size = keyof typeof SIZES;
 
 export function scanPanel() {
   const scans: ScanEntry[] = [];
   const projects = new Map<string, Project>();
+  const opts = { format: 'mp4' as 'mp4' | 'gif', size: 'large' as Size, trim: 0 };
   let queue = Promise.resolve();
+  let lastUrl = '';
 
-  const drop = dropZone('Drop scans or photos here or click to choose them', 'image/*', true, (f) => add(f));
+  const drop = dropZone('Drop scans, photos or PDFs here or click to choose them', 'image/*,application/pdf,.pdf', true, (f) => void add(f));
   const list = el('div', { class: 'scans' });
   const info = el('p', { class: 'muted' });
+
+  const formatCtl = segmented(
+    [
+      { value: 'mp4', label: 'MP4' },
+      { value: 'gif', label: 'GIF' },
+    ],
+    () => opts.format,
+    (v) => {
+      opts.format = v;
+      // GIFs get big fast, so they start small
+      opts.size = v === 'gif' ? 'small' : 'large';
+      changed();
+    },
+  );
+  const sizeCtl = segmented(
+    [
+      { value: 'small', label: 'Small' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'large', label: 'Large' },
+    ],
+    () => opts.size,
+    (v) => ((opts.size = v), changed()),
+  );
+  const sizeLabel = el('span', { class: 'muted' });
+  const trimCtl = slider(
+    'Trim edges',
+    { min: () => 0, max: () => 6, step: 0.5 },
+    () => opts.trim,
+    (v) => ((opts.trim = v), changed()),
+    () => (opts.trim ? `${opts.trim} %` : 'Off'),
+  );
+  formatCtl.el.classList.add('grid2');
+  sizeCtl.el.classList.add('grid3');
+  const exportOpts = el(
+    'div',
+    { class: 'stack', hidden: true },
+    el('h2', { class: 'section-title', textContent: 'Export' }),
+    formatCtl.el,
+    sizeCtl.el,
+    sizeLabel,
+    trimCtl.el,
+  );
+
   const exportBtn = el('button', { class: 'primary wide', textContent: 'Export MP4', disabled: true });
-  const mp4Link = el('a', { class: 'button wide', hidden: true });
+  const fileLink = el('a', { class: 'button wide', hidden: true });
   const exportNote = el('p', { class: 'muted' });
 
   const player = el('canvas', { title: 'Click to pause', hidden: true });
   const empty = el('p', { class: 'muted', textContent: 'The animation plays here once sheets are added.' });
 
-  function add(files: File[]) {
-    for (const file of files) {
-      const entry: ScanEntry = { file, status: 'waiting' };
+  async function add(files: File[]) {
+    const entries = await toEntries(files);
+    for (const entry of entries) {
       scans.push(entry);
       queue = queue.then(async () => {
         render();
@@ -39,6 +87,21 @@ export function scanPanel() {
     return best;
   }
 
+  const outSize = (p: Project) => frameSize(p.payload.spec.aspect, SIZES[opts.size]);
+
+  function changed() {
+    for (const c of [formatCtl, sizeCtl, trimCtl]) c.sync();
+    exportBtn.textContent = opts.format === 'gif' ? 'Export GIF' : 'Export MP4';
+    const p = current();
+    if (p) {
+      const s = outSize(p);
+      sizeLabel.textContent = `${s.w} × ${s.h} pixels`;
+    }
+    fileLink.hidden = true;
+    exportNote.textContent = '';
+    shown = -1;
+  }
+
   function render() {
     list.replaceChildren(
       ...scans.map((s) => {
@@ -48,10 +111,10 @@ export function scanPanel() {
         if (s.status === 'waiting') text = 'Waiting';
         else if (s.status === 'working') text = 'Reading…';
         else if (s.status === 'failed') {
-          text = s.error ?? 'Not recognised';
+          text = s.error ?? 'No Rotopaper sheet found in this image.';
           cls = 'warn';
         } else if (r?.payload) text = `Sheet ${r.payload.page} of ${r.payload.pages}`;
-        return el('div', {}, el('span', { textContent: s.file.name }), el('span', { className: cls, textContent: text }));
+        return el('div', { class: s.status === 'failed' ? 'failed' : '' }, el('span', { textContent: s.name }), el('span', { className: cls, textContent: text }));
       }),
     );
     const p = current();
@@ -64,21 +127,16 @@ export function scanPanel() {
       (projects.size > 1 ? ' · sheets from another project are left out' : '');
     player.hidden = false;
     empty.hidden = true;
+    exportOpts.hidden = false;
     exportBtn.disabled = false;
     if (player.width !== p.frameW) {
       player.width = p.frameW;
       player.height = p.frameH;
     }
+    changed();
   }
 
-  // player loop
-  let playing = true;
-  let t0 = performance.now();
-  let shown = -1;
-  player.onclick = () => {
-    playing = !playing;
-    t0 = performance.now();
-  };
+  /** Frame list in order; a missing frame repeats the one before it. */
   const ordered = (p: Project) => {
     const out: (ImageBitmap | undefined)[] = [];
     let last: ImageBitmap | undefined;
@@ -88,19 +146,34 @@ export function scanPanel() {
     }
     return out;
   };
+
+  const drawer = (frames: (ImageBitmap | undefined)[]): DrawFrame => (ctx, i, w, h) => {
+    const f = frames[i];
+    if (!f) {
+      ctx.fillStyle = '#1b1b1b';
+      ctx.fillRect(0, 0, w, h);
+      return;
+    }
+    const t = opts.trim / 100;
+    ctx.drawImage(f, f.width * t, f.height * t, f.width * (1 - 2 * t), f.height * (1 - 2 * t), 0, 0, w, h);
+  };
+
+  // player loop
+  let playing = true;
+  let t0 = performance.now();
+  let shown = -1;
+  player.onclick = () => {
+    playing = !playing;
+    t0 = performance.now();
+  };
   const tick = (now: number) => {
     const p = current();
     if (p && playing) {
       const i = Math.floor(((now - t0) / 1000) * p.payload.fps) % p.payload.frameCount;
       if (i !== shown) {
         shown = i;
-        const ctx = player.getContext('2d')!;
-        const f = ordered(p)[i];
-        if (f) ctx.drawImage(f, 0, 0, player.width, player.height);
-        else {
-          ctx.fillStyle = '#1b1b1b';
-          ctx.fillRect(0, 0, player.width, player.height);
-        }
+        const ctx = player.getContext('2d')! as unknown as OffscreenCanvasRenderingContext2D;
+        drawer(ordered(p))(ctx, i, player.width, player.height);
       }
     }
     requestAnimationFrame(tick);
@@ -111,15 +184,25 @@ export function scanPanel() {
     const p = current();
     if (!p) return;
     exportBtn.disabled = true;
-    mp4Link.hidden = true;
+    fileLink.hidden = true;
+    const s = outSize(p);
+    const gif = opts.format === 'gif';
     try {
-      const blob = await exportMp4(ordered(p), p.payload.fps, p.frameW, p.frameH, (d, n) => {
-        exportNote.textContent = `Encoding frame ${d} of ${n}`;
-      });
-      mp4Link.href = URL.createObjectURL(blob);
-      mp4Link.download = `rotopaper-${p.id}.mp4`;
-      mp4Link.textContent = `Download MP4 · ${mb(blob.size)}`;
-      mp4Link.hidden = false;
+      const job = {
+        frames: p.payload.frameCount,
+        fps: p.payload.fps,
+        w: s.w,
+        h: s.h,
+        draw: drawer(ordered(p)),
+        onProgress: (d: number, n: number) => (exportNote.textContent = `Encoding frame ${d} of ${n}`),
+      };
+      const blob = gif ? await exportGif(job) : await exportMp4(job);
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      lastUrl = URL.createObjectURL(blob);
+      fileLink.href = lastUrl;
+      fileLink.download = `rotopaper-${p.id}.${gif ? 'gif' : 'mp4'}`;
+      fileLink.textContent = `Download ${gif ? 'GIF' : 'MP4'} · ${mb(blob.size)}`;
+      fileLink.hidden = false;
       exportNote.textContent = missingPages(p).length ? 'Missing frames repeat the frame before them.' : '';
     } catch (e) {
       exportNote.textContent = e instanceof Error ? e.message : String(e);
@@ -139,8 +222,9 @@ export function scanPanel() {
         { class: 'side-scroll' },
         el('h2', { textContent: 'Add your sheets' }),
         el('div', { class: 'step-body' }, drop.el, el('p', { class: 'muted', textContent: 'Any order is fine.' }), list, info),
+        exportOpts,
       ),
-      el('div', { class: 'side-foot' }, exportBtn, mp4Link, exportNote),
+      el('div', { class: 'side-foot' }, exportBtn, fileLink, exportNote),
     ),
     el('div', { class: 'stage' }, player, empty),
   );
