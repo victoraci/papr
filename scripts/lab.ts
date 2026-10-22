@@ -39,7 +39,7 @@ mkdirSync(OUT, { recursive: true });
 // --- sheets ---
 const pdf = await buildSheetsPdf({
   spec: SPEC,
-  style: { text: true, borders: !!process.env.BORDERS },
+  style: { borders: !!process.env.BORDERS, frameNumbers: true, sheetNumber: true, fileName: true },
   projectId: 'LAB001',
   fps: FPS,
   frameCount: N,

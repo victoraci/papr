@@ -7,10 +7,13 @@ import type { Layout, MarkerPlace, Rect } from './layout.ts';
 import { encodePayload, firstFrameOfPage, type SheetPayload } from './payload.ts';
 
 export interface SheetStyle {
-  /** title, sheet number, frame numbers, note */
-  text: boolean;
   /** thin outline around each frame */
   borders: boolean;
+  frameNumbers: boolean;
+  /** project id, sheet x of y, frame range */
+  sheetNumber: boolean;
+  /** the video's file name in the header */
+  fileName: boolean;
 }
 
 export interface SheetCanvas {
@@ -39,18 +42,20 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
   for (const m of layout.anchors) marker(c, m);
   qr(c, encodePayload(payload), layout.qr);
 
-  if (!style.text) return;
   const { header, footer } = layout;
   const last = first + count;
-  c.text(title ? `rotopaper · ${title}` : 'rotopaper', header.x, header.y + 3.2, 8);
-  c.text(`${payload.projectId} · sheet ${payload.page} of ${payload.pages}`, header.x + header.w, header.y + 3.2, 8, { right: true });
-  for (let i = 0; i < count; i++) {
-    const cell = layout.cells[i];
-    // 6 pt digits are ~2.1 mm tall; keep 1 mm air below the frame
-    c.text(String(first + i + 1), cell.x, cell.y + cell.h + 3.2, 6, { grey: true });
+  c.text(style.fileName && title ? `rotopaper · ${title}` : 'rotopaper', header.x, header.y + 3.2, 8);
+  if (style.sheetNumber) {
+    c.text(`${payload.projectId} · sheet ${payload.page} of ${payload.pages}`, header.x + header.w, header.y + 3.2, 8, { right: true });
+    c.text(`frames ${first + 1}–${last} of ${payload.frameCount} · ${payload.fps} fps`, footer.x, footer.y + footer.h - 4.6, 7, { grey: true });
   }
-  c.text(`frames ${first + 1}–${last} of ${payload.frameCount} · ${payload.fps} fps`, footer.x, footer.y + footer.h - 4.6, 7, { grey: true });
-  c.text('Don’t paint over the black squares or the QR code.', footer.x, footer.y + footer.h - 1.4, 7, { grey: true });
+  if (style.frameNumbers)
+    for (let i = 0; i < count; i++) {
+      const cell = layout.cells[i];
+      // 6 pt digits are ~2.1 mm tall; keep 1 mm air below the frame
+      c.text(String(first + i + 1), cell.x, cell.y + cell.h + 3.2, 6, { grey: true });
+    }
+  c.text('Keep the black squares and the QR code clean.', footer.x, footer.y + footer.h - 1.4, 7, { grey: true });
 }
 
 /** ArUco 4x4 marker with a 1-module black border, white bits punched out. */
