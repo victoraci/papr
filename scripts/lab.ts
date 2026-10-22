@@ -197,6 +197,12 @@ for (const sc of scenarios) {
       warnings: [`stiffness ${res.field?.smoothing}`, ...res.warnings].join('; '),
     });
 
+    if (process.env.RAW) {
+      // full-size fake scan as JPEG, e.g. to drop into the app
+      writePng(`${dir}/raw-${p}.png`, scan.image);
+      execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', `${dir}/raw-${p}.png`, '-q:v', '3', `${dir}/raw-${p}.jpg`]);
+      rmSync(`${dir}/raw-${p}.png`);
+    }
     {
       const file = `scan-${p}.png`;
       writePng(`${dir}/${file}`, overlay(cv, scan.image, res, 1100));

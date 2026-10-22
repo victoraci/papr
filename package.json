@@ -11,8 +11,10 @@
     "lab": "node scripts/lab.ts"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
     "@techstark/opencv-js": "^5.0.0-release.1",
     "jsqr": "^1.4.0",
+    "mediabunny": "^1.62.0",
     "pdf-lib": "^1.17.1",
     "qrcode-generator": "^2.0.4"
   },

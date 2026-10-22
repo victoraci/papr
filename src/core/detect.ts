@@ -62,6 +62,8 @@ export interface PageResult {
 export interface DetectOptions {
   /** output frame width in px (height follows the aspect). Default: scan resolution, max 1920 */
   frameWidth?: number;
+  /** alternative to frameWidth: size of the longer frame side in px */
+  frameLongSide?: number;
   /** used when the QR code can't be read (e.g. layout from another page of the same project) */
   fallbackPayload?: SheetPayload;
   /** warp field smoothing; higher = stiffer paper */
@@ -178,7 +180,12 @@ export async function detectPage(img: RGBAImage, opts: DetectOptions = {}): Prom
 
     // --- frames ---
     const first = firstFrameOfPage(payload);
-    const fw = even(opts.frameWidth ?? Math.min(1920, layout.cellW * result.pxPerMm));
+    const aspect = payload.spec.aspect;
+    const fw = even(
+      opts.frameWidth ??
+        (opts.frameLongSide ? (aspect >= 1 ? opts.frameLongSide : opts.frameLongSide * aspect) : undefined) ??
+        Math.min(1920, layout.cellW * result.pxPerMm),
+    );
     const fh = even(fw / payload.spec.aspect);
     const cols = payload.spec.cols;
     const found = new Set(result.inlierIds);
