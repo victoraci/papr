@@ -1,9 +1,9 @@
 // What every sheet's QR code carries. Kept to the QR "alphanumeric" charset
 // (0-9 A-Z space $%*+-./:) so the code stays small and easy to read.
 //
-//   RP1:K3X9QZ:3:12:4:3:A4L:1778:12:139:600:80
+//   RP2:K3X9QZ:3:12:4:3:A4L:1778:12:139:600:80:1250
 //   ver id     sheet/sheets cols rows paper+orientation aspect*1000 fps frames
-//   frame width*10 (mm) gap*10 (mm)
+//   frame width*10 (mm) gap*10 (mm) [start in the video, 1/100 s]
 
 import { PAPERS, SUPPORTED_VERSIONS, type PaperId, type SheetSpec } from './layout.ts';
 
@@ -16,6 +16,8 @@ export interface SheetPayload {
   spec: SheetSpec;
   fps: number;
   frameCount: number;
+  /** where the printed part starts in the original video, s (lets the sound line up) */
+  start?: number;
 }
 
 export function framesPerPage(spec: SheetSpec): number {
@@ -41,12 +43,13 @@ export function encodePayload(p: SheetPayload): string {
     p.frameCount,
     Math.round(s.frameW * 10),
     Math.round(s.gap * 10),
+    ...(p.start !== undefined ? [Math.round(p.start * 100)] : []),
   ].join(':');
 }
 
 export function decodePayload(text: string): SheetPayload | null {
   const parts = text.trim().split(':');
-  if (parts.length !== 12) return null;
+  if (parts.length !== 12 && parts.length !== 13) return null;
   const m = /^RP(\d+)$/.exec(parts[0]);
   if (!m) return null;
   const version = Number(m[1]);
@@ -57,6 +60,8 @@ export function decodePayload(text: string): SheetPayload | null {
   if (!PAPERS[paper] || (orient !== 'L' && orient !== 'P')) return null;
   const nums = [page, pages, cols, rows, aspect, fps, frames, frameW, gap].map(Number);
   if (nums.some((n) => !Number.isFinite(n) || n <= 0)) return null;
+  const start = parts[12] !== undefined ? Number(parts[12]) / 100 : undefined;
+  if (start !== undefined && !(start >= 0)) return null;
   return {
     version,
     projectId,
@@ -74,6 +79,7 @@ export function decodePayload(text: string): SheetPayload | null {
     },
     fps: nums[5],
     frameCount: nums[6],
+    start,
   };
 }
 

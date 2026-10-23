@@ -1,19 +1,35 @@
-// Frames → MP4 (WebCodecs via mediabunny) or GIF (gifenc), all in the browser.
+// Frames → MP4 (WebCodecs via mediabunny), GIF (gifenc) or PNG frames in a ZIP.
+// Everything runs in the browser.
 
+import { zipSync } from 'fflate';
 import { GIFEncoder, applyPalette, quantize } from 'gifenc';
-import { BufferTarget, CanvasSource, getFirstEncodableVideoCodec, Mp4OutputFormat, Output, QUALITY_HIGH } from 'mediabunny';
+import {
+  AudioBufferSource,
+  BufferTarget,
+  CanvasSource,
+  getFirstEncodableAudioCodec,
+  getFirstEncodableVideoCodec,
+  Mp4OutputFormat,
+  Output,
+  QUALITY_HIGH,
+} from 'mediabunny';
 
-/** Draws frame i into the canvas at w × h. */
+/** Draws output frame i into the canvas at w × h. */
 export type DrawFrame = (ctx: OffscreenCanvasRenderingContext2D, i: number, w: number, h: number) => void;
 
 export interface ExportJob {
+  /** number of output frames */
   frames: number;
   fps: number;
   w: number;
   h: number;
   draw: DrawFrame;
+  /** sound for the whole output, MP4 only */
+  audio?: AudioBuffer;
   onProgress?: (done: number, total: number) => void;
 }
+
+const breathe = () => new Promise((r) => setTimeout(r, 0));
 
 export async function exportMp4(job: ExportJob): Promise<Blob> {
   const { w, h, fps } = job;
@@ -23,13 +39,25 @@ export async function exportMp4(job: ExportJob): Promise<Blob> {
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext('2d')!;
   const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
-  const source = new CanvasSource(canvas, { codec, bitrate: QUALITY_HIGH });
-  output.addVideoTrack(source, { frameRate: fps });
+  const video = new CanvasSource(canvas, { codec, quality: QUALITY_HIGH });
+  output.addVideoTrack(video, { frameRate: fps });
+
+  let audio: AudioBufferSource | null = null;
+  if (job.audio) {
+    const audioCodec = await getFirstEncodableAudioCodec(['aac', 'opus'], {
+      numberOfChannels: job.audio.numberOfChannels,
+      sampleRate: job.audio.sampleRate,
+    });
+    if (!audioCodec) throw new Error('This browser can’t encode sound. Export without sound or try Chrome.');
+    audio = new AudioBufferSource({ codec: audioCodec, quality: QUALITY_HIGH });
+    output.addAudioTrack(audio);
+  }
   await output.start();
+  if (audio && job.audio) await audio.add(job.audio);
 
   for (let i = 0; i < job.frames; i++) {
     job.draw(ctx, i, w, h);
-    await source.add(i / fps, 1 / fps);
+    await video.add(i / fps, 1 / fps);
     job.onProgress?.(i + 1, job.frames);
   }
   await output.finalize();
@@ -50,9 +78,45 @@ export async function exportGif(job: ExportJob): Promise<Blob> {
     const palette = quantize(data, 256);
     gif.writeFrame(applyPalette(data, palette), w, h, { palette, delay, repeat: 0 });
     job.onProgress?.(i + 1, job.frames);
-    // keep the page responsive on long animations
-    if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0));
+    if (i % 8 === 7) await breathe(); // keep the page responsive
   }
   gif.finish();
   return new Blob([gif.bytes() as BlobPart], { type: 'image/gif' });
+}
+
+/** Every frame as a PNG, numbered, in one ZIP (PNGs are compressed already, so the ZIP just stores them). */
+export async function exportPngZip(job: ExportJob, name: string): Promise<Blob> {
+  const { w, h } = job;
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d')!;
+  const files: Record<string, [Uint8Array, { level: 0 }]> = {};
+  const digits = Math.max(4, String(job.frames).length);
+  for (let i = 0; i < job.frames; i++) {
+    job.draw(ctx, i, w, h);
+    const png = new Uint8Array(await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer());
+    files[`${name}/${name}_${String(i + 1).padStart(digits, '0')}.png`] = [png, { level: 0 }];
+    job.onProgress?.(i + 1, job.frames);
+  }
+  return new Blob([zipSync(files) as BlobPart], { type: 'application/zip' });
+}
+
+/** The original sound for the printed part, repeated `times`. */
+export async function cutSound(file: File, start: number, duration: number, times: number): Promise<AudioBuffer> {
+  const ctx = new OfflineAudioContext(2, 1, 48000);
+  let full: AudioBuffer;
+  try {
+    full = await ctx.decodeAudioData(await file.arrayBuffer());
+  } catch {
+    throw new Error('This video has no sound this browser can read.');
+  }
+  const rate = full.sampleRate;
+  const from = Math.min(full.length, Math.round(start * rate));
+  const len = Math.max(1, Math.round(duration * rate));
+  const out = new AudioBuffer({ length: len * times, numberOfChannels: full.numberOfChannels, sampleRate: rate });
+  for (let c = 0; c < full.numberOfChannels; c++) {
+    const piece = full.getChannelData(c).subarray(from, from + len);
+    const dst = out.getChannelData(c);
+    for (let t = 0; t < times; t++) dst.set(piece, t * len);
+  }
+  return out;
 }

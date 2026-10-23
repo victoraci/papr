@@ -19,6 +19,7 @@ import { framesPerPage, newProjectId } from '../core/payload.ts';
 import { buildSheetsPdf, pageCount } from '../core/pdf.ts';
 import type { SheetStyle } from '../core/sheet.ts';
 import { cropView } from './cropview.ts';
+import { printed } from './session.ts';
 import { renderSheetSvg } from './preview.ts';
 import { steppedPlayer } from './stepped.ts';
 import { timeline } from './timeline.ts';
@@ -397,6 +398,7 @@ export function printPanel() {
         fps: state.fps,
         frameCount: n,
         title: v.file.name,
+        start: state.start,
         getFrame: (i) => grab.jpeg(i),
         onProgress: (done, total) => (pdfNote.textContent = `Preparing frame ${done} of ${total}`),
       });
@@ -407,6 +409,7 @@ export function printPanel() {
       pdfLink.textContent = `Download PDF · ${mb(bytes.length)}`;
       pdfLink.hidden = false;
       pdfNote.textContent = 'Print at 100 % or fit to page.';
+      printed.set(id, { video: v, start: state.start });
       // a new PDF is a new project, so sheets of two runs can't get mixed up
       state.projectId = newProjectId();
     } catch (e) {

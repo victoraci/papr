@@ -444,6 +444,75 @@ p:empty {
   border-radius: 2px;
 }
 
+/* --- scan stage --- */
+
+.video-stage.scan {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.frame-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 2px 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-on) transparent;
+}
+
+.thumb {
+  flex: none;
+  height: 54px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface);
+  opacity: 0.55;
+}
+
+.thumb:hover,
+.thumb.on {
+  opacity: 1;
+  background: var(--surface);
+}
+
+.thumb.on {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.thumb canvas {
+  display: block;
+  height: 100%;
+  width: auto;
+}
+
+.thumb.missing {
+  background: repeating-linear-gradient(135deg, var(--surface) 0 6px, var(--surface-2) 6px 12px);
+}
+
+.sheet-list {
+  display: grid;
+  gap: 4px;
+}
+
+.sheet-list:empty {
+  display: none;
+}
+
+.sheet-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sheet-list > div > :last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- controls --- */
 
 button,

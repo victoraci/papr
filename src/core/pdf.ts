@@ -18,6 +18,8 @@ export interface SheetsInput {
   fps: number;
   frameCount: number;
   getFrame: (index: number) => Promise<FrameImage>;
+  /** where the printed part starts in the video, s; goes into the QR code for the sound */
+  start?: number;
   /** printed in the header, e.g. the video's file name */
   title?: string;
   onProgress?: (done: number, total: number) => void;
@@ -62,6 +64,7 @@ export async function buildSheetsPdf(input: SheetsInput): Promise<Uint8Array> {
         spec: input.spec,
         fps: input.fps,
         frameCount: input.frameCount,
+        start: input.start,
       },
     });
   }
