@@ -55,7 +55,7 @@ export async function buildSheetsPdf(input: SheetsInput): Promise<Uint8Array> {
       title: input.title,
       style: input.style,
       payload: {
-        version: LAYOUT_VERSION,
+        version: input.spec.version ?? LAYOUT_VERSION,
         projectId: input.projectId,
         page: p,
         pages,

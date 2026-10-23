@@ -48,6 +48,37 @@ export function cards<T extends string>(
   return { el: wrap, sync };
 }
 
+/** Equal-width option buttons in a grid, optionally with a small icon above the label. */
+export function chips<T extends string | number>(
+  options: { value: T; label: string; icon?: () => HTMLElement }[],
+  get: () => T,
+  set: (v: T) => void,
+  columns: number,
+): Control & { setOptions(o: { value: T; label: string; icon?: () => HTMLElement }[]): void } {
+  const wrap = el('div', { class: 'chips' });
+  wrap.style.gridTemplateColumns = `repeat(${columns}, 1fr)`;
+  let opts = options;
+  let buttons: HTMLButtonElement[] = [];
+  const build = () => {
+    buttons = opts.map((o) => el('button', { onclick: () => (set(o.value), sync()) }, o.icon?.(), el('span', { textContent: o.label })));
+    wrap.replaceChildren(...buttons);
+  };
+  const sync = () => buttons.forEach((b, i) => b.classList.toggle('on', opts[i].value === get()));
+  build();
+  sync();
+  return {
+    el: wrap,
+    sync,
+    setOptions(o) {
+      if (o.map((x) => `${x.value}:${x.label}`).join() !== opts.map((x) => `${x.value}:${x.label}`).join()) {
+        opts = o;
+        build();
+      }
+      sync();
+    },
+  };
+}
+
 export function segmented<T extends string>(options: { value: T; label: string }[], get: () => T, set: (v: T) => void): Control {
   const wrap = el('div', { class: 'segmented' });
   const buttons = options.map((o) => el('button', { textContent: o.label, onclick: () => (set(o.value), sync()) }));

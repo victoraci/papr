@@ -2,7 +2,7 @@
 
 import { exportGif, exportMp4, type DrawFrame } from './export.ts';
 import { frameSize, missingPages, processScan, toEntries, type Project, type ScanEntry } from './scans.ts';
-import { dropZone, el, mb, segmented, slider } from './ui.ts';
+import { dropZone, el, mb, segmented, slider, toggleRow } from './ui.ts';
 
 const SIZES = { small: 640, medium: 960, large: 1280 } as const;
 type Size = keyof typeof SIZES;
@@ -10,7 +10,7 @@ type Size = keyof typeof SIZES;
 export function scanPanel() {
   const scans: ScanEntry[] = [];
   const projects = new Map<string, Project>();
-  const opts = { format: 'mp4' as 'mp4' | 'gif', size: 'large' as Size, trim: 0 };
+  const opts = { format: 'mp4' as 'mp4' | 'gif', size: 'large' as Size, trim: 0, keepBorder: false };
   let queue = Promise.resolve();
   let lastUrl = '';
 
@@ -50,6 +50,7 @@ export function scanPanel() {
   );
   formatCtl.el.classList.add('grid2');
   sizeCtl.el.classList.add('grid3');
+  const borderCtl = toggleRow('Keep the white border', () => opts.keepBorder, (v) => ((opts.keepBorder = v), changed()));
   const exportOpts = el(
     'div',
     { class: 'stack', hidden: true },
@@ -57,6 +58,7 @@ export function scanPanel() {
     formatCtl.el,
     sizeCtl.el,
     sizeLabel,
+    borderCtl.el,
     trimCtl.el,
   );
 
@@ -87,15 +89,27 @@ export function scanPanel() {
     return best;
   }
 
-  const outSize = (p: Project) => frameSize(p.payload.spec.aspect, SIZES[opts.size]);
+  /** Part of each stored image that goes into the video. */
+  const source = (p: Project) => (opts.keepBorder && p.inner.x > 0 ? { x: 0, y: 0, w: p.full.w, h: p.full.h } : p.inner);
+  const outSize = (p: Project) => {
+    const s = source(p);
+    return frameSize(s.w / s.h, SIZES[opts.size]);
+  };
 
   function changed() {
-    for (const c of [formatCtl, sizeCtl, trimCtl]) c.sync();
+    for (const c of [formatCtl, sizeCtl, trimCtl, borderCtl]) c.sync();
     exportBtn.textContent = opts.format === 'gif' ? 'Export GIF' : 'Export MP4';
     const p = current();
     if (p) {
       const s = outSize(p);
       sizeLabel.textContent = `${s.w} × ${s.h} pixels`;
+      borderCtl.el.hidden = p.inner.x === 0;
+      // the player shows exactly what gets exported
+      const ps = frameSize(s.w / s.h, 1280);
+      if (player.width !== ps.w || player.height !== ps.h) {
+        player.width = ps.w;
+        player.height = ps.h;
+      }
     }
     fileLink.hidden = true;
     exportNote.textContent = '';
@@ -129,10 +143,6 @@ export function scanPanel() {
     empty.hidden = true;
     exportOpts.hidden = false;
     exportBtn.disabled = false;
-    if (player.width !== p.frameW) {
-      player.width = p.frameW;
-      player.height = p.frameH;
-    }
     changed();
   }
 
@@ -147,15 +157,18 @@ export function scanPanel() {
     return out;
   };
 
-  const drawer = (frames: (ImageBitmap | undefined)[]): DrawFrame => (ctx, i, w, h) => {
-    const f = frames[i];
-    if (!f) {
-      ctx.fillStyle = '#1b1b1b';
-      ctx.fillRect(0, 0, w, h);
-      return;
-    }
+  const drawer = (p: Project, frames: (ImageBitmap | undefined)[]): DrawFrame => {
+    const s = source(p);
     const t = opts.trim / 100;
-    ctx.drawImage(f, f.width * t, f.height * t, f.width * (1 - 2 * t), f.height * (1 - 2 * t), 0, 0, w, h);
+    return (ctx, i, w, h) => {
+      const f = frames[i];
+      if (!f) {
+        ctx.fillStyle = '#1b1b1b';
+        ctx.fillRect(0, 0, w, h);
+        return;
+      }
+      ctx.drawImage(f, s.x + s.w * t, s.y + s.h * t, s.w * (1 - 2 * t), s.h * (1 - 2 * t), 0, 0, w, h);
+    };
   };
 
   // player loop
@@ -173,7 +186,7 @@ export function scanPanel() {
       if (i !== shown) {
         shown = i;
         const ctx = player.getContext('2d')! as unknown as OffscreenCanvasRenderingContext2D;
-        drawer(ordered(p))(ctx, i, player.width, player.height);
+        drawer(p, ordered(p))(ctx, i, player.width, player.height);
       }
     }
     requestAnimationFrame(tick);
@@ -193,7 +206,7 @@ export function scanPanel() {
         fps: p.payload.fps,
         w: s.w,
         h: s.h,
-        draw: drawer(ordered(p)),
+        draw: drawer(p, ordered(p)),
         onProgress: (d: number, n: number) => (exportNote.textContent = `Encoding frame ${d} of ${n}`),
       };
       const blob = gif ? await exportGif(job) : await exportMp4(job);

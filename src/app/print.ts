@@ -1,145 +1,183 @@
-// Print panel: video → sheets, one step at a time, with the sheet as preview.
+// Print panel: video → sheets in five steps. The stage on the right shows
+// what the current step is about: the moving video, the crop, or the sheet.
 
 import {
+  BORDERS,
   computeLayout,
-  FRAME_MIN,
-  GAP_MIN,
+  gapForBorder,
+  gridChoices,
   LAYOUT_VERSION,
-  makeSpec,
-  maxFrameWidth,
   PAPERS,
+  specForGrid,
   validateSpec,
+  type BorderId,
+  type GridChoice,
   type PaperId,
   type SheetSpec,
 } from '../core/layout.ts';
 import { framesPerPage, newProjectId } from '../core/payload.ts';
 import { buildSheetsPdf, pageCount } from '../core/pdf.ts';
 import type { SheetStyle } from '../core/sheet.ts';
+import { cropView } from './cropview.ts';
 import { renderSheetSvg } from './preview.ts';
-import { cards, dropZone, el, mb, plural, segmented, slider, stepper, toggleRow, type Control } from './ui.ts';
-import { frameGrabber, loadVideo, type LoadedVideo } from './video.ts';
+import { steppedPlayer } from './stepped.ts';
+import { timeline } from './timeline.ts';
+import { cards, chips, dropZone, el, mb, plural, segmented, toggleRow, type Control } from './ui.ts';
+import { frameGrabber, loadVideo, type Crop, type LoadedVideo } from './video.ts';
 
-const RATIOS: { value: string; label: string; ratio: number }[] = [
-  { value: '16:9', label: '16:9', ratio: 16 / 9 },
-  { value: '4:3', label: '4:3', ratio: 4 / 3 },
-  { value: '1:1', label: '1:1', ratio: 1 },
-  { value: '4:5', label: '4:5', ratio: 4 / 5 },
-  { value: '9:16', label: '9:16', ratio: 9 / 16 },
-  { value: '2.39:1', label: '2.39:1', ratio: 2.39 },
+const FPS_CHOICES = [6, 8, 12, 15, 24];
+const CROPS: { value: string; ratio: number }[] = [
+  { value: '1:1', ratio: 1 },
+  { value: '4:5', ratio: 4 / 5 },
+  { value: '9:16', ratio: 9 / 16 },
+  { value: '16:9', ratio: 16 / 9 },
+  { value: '4:3', ratio: 4 / 3 },
 ];
-const GAP_UI_MAX = 20;
-const FRAME_UI_MIN = 20;
+const MAX_GRID_OPTIONS = 8;
 
-function ratioName(r: number): string {
-  const near = RATIOS.find((a) => Math.abs(a.ratio - r) < 0.01);
-  return near ? near.label : `${r.toFixed(2)}:1`;
+/** Up to `max` options, spread evenly over the list. */
+function spread<T>(list: T[], max: number): T[] {
+  if (list.length <= max) return list;
+  return [...new Set([...Array(max).keys()].map((i) => Math.round((i * (list.length - 1)) / (max - 1))))].map((i) => list[i]);
 }
+
+function ratioIcon(ratio: number) {
+  const box = el('span', { class: 'ratio-icon' });
+  const r = el('span');
+  // fit a 22 × 22 box
+  r.style.width = `${ratio >= 1 ? 22 : 22 * ratio}px`;
+  r.style.height = `${ratio >= 1 ? 22 / ratio : 22}px`;
+  box.append(r);
+  return box;
+}
+
+const fmtTime = (t: number) => `${t.toFixed(1)} s`;
 
 export function printPanel() {
   const state = {
     video: null as LoadedVideo | null,
-    paper: 'A4' as PaperId,
-    landscape: true,
-    shape: 'video' as 'video' | 'other',
-    ratio: '1:1',
-    frameW: 60,
-    gap: 8,
-    fps: 12,
     start: 0,
     end: 0,
-    style: { borders: false, frameNumbers: true, sheetNumber: true, fileName: true } as SheetStyle,
+    fps: 12,
+    crop: 'original',
+    cropX: 0.5,
+    cropY: 0.5,
+    paper: 'A4' as PaperId,
+    landscape: true,
+    count: 9,
+    border: 'none' as BorderId,
+    style: { borders: false, frameNumbers: true, fileName: true } as SheetStyle,
     projectId: newProjectId(),
     step: 0,
     page: 1,
     pdfUrl: '',
   };
 
+  // --- derived ---
   const aspect = () => {
-    if (state.shape === 'other') return RATIOS.find((r) => r.value === state.ratio)!.ratio;
+    const c = CROPS.find((x) => x.value === state.crop);
+    if (c) return c.ratio;
     return state.video ? state.video.width / state.video.height : 16 / 9;
   };
-  const spec = (): SheetSpec => makeSpec(state.paper, state.landscape, aspect(), state.frameW, state.gap);
+  const crop = (): Crop => ({ aspect: aspect(), x: state.cropX, y: state.cropY });
+  const gap = () => gapForBorder(BORDERS[state.border]);
+  const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, aspect(), gap()), MAX_GRID_OPTIONS);
+  const choice = (): GridChoice => {
+    const list = choices();
+    return list.reduce((best, c) => (Math.abs(c.count - state.count) < Math.abs(best.count - state.count) ? c : best), list[0]);
+  };
+  const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, aspect(), gap(), choice());
   // without a video the preview shows one full sheet of empty frames
   const frameCount = () => (state.video ? Math.max(1, Math.floor((state.end - state.start) * state.fps + 1e-6)) : framesPerPage(spec()));
-  const maxW = () => maxFrameWidth(state.paper, state.landscape, aspect(), state.gap);
-
-  /** Biggest frames that still give at least 9 per sheet. */
-  const defaultFrameWidth = () => {
-    for (let w = maxW(); w > FRAME_MIN; w--) {
-      const s = makeSpec(state.paper, state.landscape, aspect(), w, state.gap);
-      if (s.cols * s.rows >= 9) return w;
-    }
-    return maxW();
-  };
-  const refit = () => {
-    state.frameW = defaultFrameWidth();
-    state.page = 1;
-  };
 
   // --- step 1: video ---
   const drop = dropZone('Drop a video here or click to choose one', 'video/*', false, (f) => void open(f[0]));
-  const videoInfo = el('p', { class: 'muted' });
-  const player = el('video', { controls: true, muted: true, loop: true, playsInline: true, hidden: true });
-  const startCtl = slider(
-    'Start',
-    { min: () => 0, max: () => +(state.video?.duration ?? 1).toFixed(1), step: 0.1 },
-    () => state.start,
-    (v) => {
-      state.start = Math.min(v, state.end - 0.1);
+  const videoName = el('p', { class: 'muted' });
+  const fpsCtl = chips(
+    FPS_CHOICES.map((f) => ({ value: f, label: String(f) })),
+    () => state.fps,
+    (v) => ((state.fps = v), changed()),
+    5,
+  );
+  const fpsBlock = el(
+    'div',
+    { class: 'stack', hidden: true },
+    el('span', { textContent: 'Frames per second' }),
+    fpsCtl.el,
+    el('p', { class: 'muted small', textContent: 'Animation on paper usually runs at 8 or 12.' }),
+  );
+  const videoSummary = el('p', { class: 'muted' });
+
+  const player = steppedPlayer((t) => tl.setPlayhead(t));
+  const tl = timeline(
+    () => ({ start: state.start, end: state.end }),
+    (r) => {
+      state.start = r.start;
+      state.end = r.end;
       changed();
     },
-    () => `${state.start.toFixed(1)} s`,
+    () => 2 / state.fps,
   );
-  const endCtl = slider(
-    'End',
-    { min: () => 0, max: () => +(state.video?.duration ?? 1).toFixed(1), step: 0.1 },
-    () => state.end,
-    (v) => {
-      state.end = Math.max(v, state.start + 0.1);
-      changed();
-    },
-    () => `${state.end.toFixed(1)} s`,
-  );
-  const section = el('div', { class: 'stack', hidden: true }, startCtl.el, endCtl.el);
+  const tlLabel = el('div', { class: 'tl-label' });
+  const videoStage = el('div', { class: 'video-stage' }, player.el, tl.el, tlLabel);
+  const videoEmpty = el('p', { class: 'muted', textContent: 'Your video shows up here.' });
 
   async function open(file: File) {
-    videoInfo.className = 'muted';
-    videoInfo.textContent = 'Opening…';
+    videoName.className = 'muted';
+    videoName.textContent = 'Opening…';
     try {
       const v = await loadVideo(file);
       if (state.video) URL.revokeObjectURL(state.video.url);
       state.video = v;
       state.start = 0;
-      state.end = +v.duration.toFixed(1);
-      state.shape = 'video';
+      state.end = v.duration;
+      state.crop = 'original';
+      state.cropX = state.cropY = 0.5;
       state.landscape = v.width >= v.height;
-      refit();
+      state.page = 1;
       thumbs.clear();
-      videoInfo.textContent = `${file.name} · ${v.duration.toFixed(1)} s`;
+      videoName.textContent = file.name;
       drop.label.textContent = 'Choose another video';
-      player.src = v.url;
-      player.hidden = false;
-      section.hidden = false;
-      shapeCtl = buildShapeCards();
-      shapeSlot.replaceChildren(shapeCtl.el);
+      fpsBlock.hidden = false;
+      tl.load(v);
       changed();
+      renderStage();
     } catch (e) {
-      videoInfo.className = 'warn';
-      videoInfo.textContent = e instanceof Error ? e.message : String(e);
+      videoName.className = 'warn';
+      videoName.textContent = e instanceof Error ? e.message : String(e);
     }
   }
 
-  // --- step 2: paper ---
-  const paperCtl = cards(
-    (Object.keys(PAPERS) as PaperId[])
-      .sort((a, b) => ['A4', 'A3', 'A5', 'LT'].indexOf(a) - ['A4', 'A3', 'A5', 'LT'].indexOf(b))
-      .map((id) => ({ value: id, title: PAPERS[id].name, hint: id === 'LT' ? '8.5 × 11 in' : `${PAPERS[id].w} × ${PAPERS[id].h} mm` })),
-    () => state.paper,
+  // --- step 2: crop ---
+  const cropCtl = chips(
+    [
+      { value: 'original', label: 'Original', icon: () => ratioIcon(state.video ? state.video.width / state.video.height : 16 / 9) },
+      ...CROPS.map((c) => ({ value: c.value, label: c.value, icon: () => ratioIcon(c.ratio) })),
+    ],
+    () => state.crop,
     (v) => {
-      state.paper = v;
-      refit();
+      state.crop = v;
+      state.cropX = state.cropY = 0.5;
       changed();
     },
+    3,
+  );
+  const cropHint = el('p', { class: 'muted small', textContent: 'Drag the picture to choose what stays in the frame.' });
+  const cropper = cropView(crop, (c) => {
+    state.cropX = c.x;
+    state.cropY = c.y;
+    changed();
+  });
+
+  // --- step 3: paper ---
+  const paperCtl = cards(
+    (['A4', 'A3', 'A5', 'LT'] as PaperId[]).map((id) => ({
+      value: id,
+      title: PAPERS[id].name,
+      hint: id === 'LT' ? '8.5 × 11 in' : `${PAPERS[id].w} × ${PAPERS[id].h} mm`,
+    })),
+    () => state.paper,
+    (v) => ((state.paper = v), changed()),
   );
   const orientCtl = segmented(
     [
@@ -147,98 +185,63 @@ export function printPanel() {
       { value: 'L', label: 'Landscape' },
     ],
     () => (state.landscape ? 'L' : 'P'),
-    (v) => {
-      state.landscape = v === 'L';
-      refit();
-      changed();
-    },
+    (v) => ((state.landscape = v === 'L'), changed()),
   );
+  orientCtl.el.classList.add('grid2');
 
-  // --- step 3: frame shape ---
-  const ratioCtl = segmented(
-    RATIOS.map((r) => ({ value: r.value, label: r.label })),
-    () => state.ratio,
-    (v) => {
-      state.ratio = v;
-      refit();
-      changed();
-    },
+  // --- step 4: layout ---
+  const gridCtl = chips([], () => choice().count, (v) => ((state.count = v), changed()), 4);
+  const frameSizeNote = el('p', { class: 'muted small' });
+  const borderCtl = segmented(
+    [
+      { value: 'none', label: 'None' },
+      { value: 'small', label: 'Small' },
+      { value: 'large', label: 'Large' },
+    ],
+    () => state.border,
+    (v) => ((state.border = v), changed()),
   );
-  ratioCtl.el.classList.add('grid3');
-  const ratioWrap = el('div', { hidden: true }, ratioCtl.el);
-  const buildShapeCards = () =>
-    cards(
-      [
-        { value: 'video' as const, title: 'Same as the video', hint: state.video ? ratioName(state.video.width / state.video.height) : 'Keeps the original shape' },
-        { value: 'other' as const, title: 'Another shape', hint: 'The video gets cropped to fit' },
-      ],
-      () => state.shape,
-      (v) => {
-        state.shape = v;
-        refit();
-        changed();
-      },
-    );
-  let shapeCtl = buildShapeCards();
-  const shapeSlot = el('div', {}, shapeCtl.el);
+  borderCtl.el.classList.add('grid3');
+  const outlineCtl = toggleRow('Thin line around each frame', () => state.style.borders, (v) => ((state.style.borders = v), changed()));
 
-  // --- step 4: size and speed ---
-  const fpsCtl = stepper('Frames per second', { min: 1, max: 30 }, () => state.fps, (v) => ((state.fps = v), changed()), () =>
-    state.video ? plural(frameCount(), 'frame', 'frames') + ' in total' : '',
-  );
-  const sizeCtl = slider(
-    'Frame size',
-    { min: () => Math.min(FRAME_UI_MIN, maxW()), max: maxW, step: 1 },
-    () => state.frameW,
-    (v) => ((state.frameW = v), changed()),
-    () => `${state.frameW} mm wide · ${framesPerPage(spec())} per sheet`,
-  );
-  const gapCtl = slider(
-    'Space between frames',
-    { min: () => GAP_MIN, max: () => GAP_UI_MAX, step: 1 },
-    () => state.gap,
-    (v) => {
-      state.gap = v;
-      state.frameW = Math.min(state.frameW, maxW());
-      changed();
-    },
-    () => `${state.gap} mm`,
-  );
-
-  // --- step 5: extras ---
-  const extras: Control[] = [
-    toggleRow('Frame borders', () => state.style.borders, (v) => ((state.style.borders = v), changed())),
-    toggleRow('Frame numbers', () => state.style.frameNumbers, (v) => ((state.style.frameNumbers = v), changed())),
-    toggleRow('Sheet number', () => state.style.sheetNumber, (v) => ((state.style.sheetNumber = v), changed())),
-    toggleRow('File name', () => state.style.fileName, (v) => ((state.style.fileName = v), changed())),
-  ];
-
-  // --- step 6: print ---
+  // --- step 5: print ---
   const summary = el('div', { class: 'summary' });
+  const labels: Control[] = [
+    toggleRow('Frame numbers', () => state.style.frameNumbers, (v) => ((state.style.frameNumbers = v), changed())),
+    toggleRow('Video file name', () => state.style.fileName, (v) => ((state.style.fileName = v), changed())),
+  ];
   const pdfLink = el('a', { class: 'button primary wide', hidden: true });
   const pdfNote = el('p', { class: 'muted' });
 
-  const steps: { title: string; body: Node[]; ready?: () => boolean }[] = [
-    { title: 'Pick a video', body: [drop.el, videoInfo, player, section], ready: () => !!state.video },
-    { title: 'Choose your paper', body: [paperCtl.el, orientCtl.el] },
-    { title: 'Choose a frame shape', body: [shapeSlot, ratioWrap] },
-    { title: 'Set size and speed', body: [fpsCtl.el, sizeCtl.el, gapCtl.el] },
-    { title: 'Choose what else is printed', body: [el('div', { class: 'toggles' }, ...extras.map((c) => c.el))] },
-    { title: 'Print your sheets', body: [summary, pdfLink, pdfNote] },
+  const label = (t: string) => el('span', { textContent: t });
+  const steps: { title: string; hint?: () => string; body: Node[]; stage: 'video' | 'crop' | 'sheet' }[] = [
+    { title: 'Video', body: [drop.el, videoName, fpsBlock, videoSummary], stage: 'video' },
+    { title: 'Crop', hint: () => 'The shape your frames get on paper and in the finished video.', body: [cropCtl.el, cropHint], stage: 'crop' },
+    { title: 'Paper', body: [paperCtl.el, orientCtl.el], stage: 'sheet' },
+    {
+      title: 'Layout',
+      body: [
+        el('div', { class: 'stack' }, label('Frames per sheet'), gridCtl.el, frameSizeNote),
+        el(
+          'div',
+          { class: 'stack' },
+          label('White border'),
+          borderCtl.el,
+          el('p', { class: 'muted small', textContent: 'Blank paper around each frame to paint past the edge. You can keep it in the finished video.' }),
+        ),
+        outlineCtl.el,
+      ],
+      stage: 'sheet',
+    },
+    { title: 'Print', body: [summary, el('div', { class: 'stack' }, label('Printed next to the frames'), el('div', { class: 'toggles' }, ...labels.map((c) => c.el))), pdfLink, pdfNote], stage: 'sheet' },
   ];
 
   // --- sidebar shell ---
   const title = el('h2');
+  const stepHint = el('p', { class: 'muted small' });
   const body = el('div', { class: 'step-body' });
   const progress = el('div', { class: 'progress' });
-  const segs = steps.map((_, i) =>
-    el('button', {
-      ariaLabel: `Step ${i + 1}`,
-      onclick: () => {
-        if (state.video || i === 0) go(i);
-      },
-    }),
-  );
+  const segs = steps.map((_, i) => el('button', { ariaLabel: `Step ${i + 1}`, onclick: () => state.video && go(i) }));
   progress.append(...segs);
   const back = el('button', { textContent: 'Back', onclick: () => go(state.step - 1) });
   const next = el('button', { class: 'primary', textContent: 'Next' });
@@ -247,24 +250,39 @@ export function printPanel() {
   function go(i: number) {
     state.step = Math.max(0, Math.min(steps.length - 1, i));
     renderStep();
+    renderStage();
   }
 
   function renderStep() {
     const s = steps[state.step];
     title.textContent = s.title;
+    stepHint.textContent = s.hint?.() ?? '';
     body.replaceChildren(...s.body);
     segs.forEach((b, i) => b.classList.toggle('done', i <= state.step));
     back.disabled = state.step === 0;
     next.textContent = state.step === steps.length - 1 ? 'Create PDF' : 'Next';
-    next.disabled = !(s.ready?.() ?? true);
+    next.disabled = !state.video;
   }
 
-  // --- stage: sheet preview ---
+  // --- stage ---
+  const stage = el('div', { class: 'stage' });
   const sheet = el('div', { class: 'sheet' });
   const pageLabel = el('span', { class: 'muted' });
   const prev = el('button', { class: 'round', textContent: '‹', ariaLabel: 'Previous sheet', onclick: () => turn(-1) });
   const nextPage = el('button', { class: 'round', textContent: '›', ariaLabel: 'Next sheet', onclick: () => turn(1) });
   const pager = el('div', { class: 'pager' }, prev, pageLabel, nextPage);
+
+  function renderStage() {
+    const kind = steps[state.step].stage;
+    if (kind === 'video') stage.replaceChildren(state.video ? videoStage : videoEmpty);
+    else if (kind === 'crop' && state.video) {
+      stage.replaceChildren(cropper.el);
+      void cropper.load(state.video, state.start);
+    } else {
+      stage.replaceChildren(sheet, pager);
+      void renderPreview();
+    }
+  }
 
   function turn(d: number) {
     state.page = Math.max(1, Math.min(pageCount(spec(), frameCount()), state.page + d));
@@ -272,7 +290,7 @@ export function printPanel() {
   }
 
   const thumbs = new Map<string, string>();
-  const thumbKey = (i: number) => `${state.start}|${state.fps}|${aspect().toFixed(4)}|${i}`;
+  const thumbKey = (i: number) => `${state.start}|${state.fps}|${aspect().toFixed(4)}|${state.cropX}|${state.cropY}|${i}`;
   let previewRun = 0;
 
   async function renderPreview() {
@@ -283,7 +301,7 @@ export function printPanel() {
     const n = frameCount();
     const pages = pageCount(s, n);
     state.page = Math.min(state.page, pages);
-    pageLabel.textContent = `${state.page} / ${pages}`;
+    pageLabel.textContent = `Sheet ${state.page} of ${pages}`;
     prev.disabled = state.page <= 1;
     nextPage.disabled = state.page >= pages;
 
@@ -305,9 +323,9 @@ export function printPanel() {
     const wanted = [...Array(Math.min(framesPerPage(s), n - first, 60)).keys()].map((k) => first + k);
     const missing = wanted.filter((i) => !thumbs.has(thumbKey(i)));
     if (!missing.length) return;
-    await new Promise((r) => setTimeout(r, 200)); // settle while sliders move
+    await new Promise((r) => setTimeout(r, 200)); // settle while things move
     if (run !== previewRun) return;
-    const grab = await frameGrabber(v, state.start, state.fps, aspect(), 240);
+    const grab = await frameGrabber(v, state.start, state.fps, crop(), 240);
     for (const i of missing) {
       if (run !== previewRun) return;
       thumbs.set(thumbKey(i), await grab.dataUrl(i));
@@ -317,11 +335,33 @@ export function printPanel() {
 
   // --- updates ---
   function changed() {
-    for (const c of [startCtl, endCtl, paperCtl, orientCtl, ratioCtl, shapeCtl, fpsCtl, sizeCtl, gapCtl, ...extras]) c.sync();
-    ratioWrap.hidden = state.shape !== 'other';
+    const v = state.video;
     const s = spec();
     const n = frameCount();
     const pages = pageCount(s, n);
+
+    fpsCtl.sync();
+    cropCtl.sync();
+    cropHint.hidden = state.crop === 'original' && !!v && Math.abs(aspect() - v.width / v.height) < 0.001;
+    paperCtl.sync();
+    orientCtl.sync();
+    borderCtl.sync();
+    outlineCtl.sync();
+    labels.forEach((c) => c.sync());
+    gridCtl.setOptions(choices().map((c) => ({ value: c.count, label: String(c.count) })));
+    frameSizeNote.textContent = `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;
+
+    if (v) {
+      videoSummary.textContent = `${fmtTime(state.end - state.start)} · ${plural(n, 'frame', 'frames')} to print`;
+      tl.sync();
+      tlLabel.replaceChildren(
+        el('span', { class: 'muted', textContent: `${fmtTime(state.start)} – ${fmtTime(state.end)}` }),
+        el('span', { class: 'muted', textContent: 'Drag the edges to pick the part you want' }),
+      );
+      player.set({ video: v, start: state.start, end: state.end, fps: state.fps, crop: crop() });
+      cropper.sync();
+    }
+
     const err = validateSpec(s);
     summary.replaceChildren(
       ...(err
@@ -330,14 +370,14 @@ export function printPanel() {
             el('p', { textContent: `${plural(n, 'frame', 'frames')} on ${plural(pages, 'sheet', 'sheets')}` }),
             el('p', {
               class: 'muted',
-              textContent: `${PAPERS[s.paper].name} ${s.landscape ? 'landscape' : 'portrait'} · frames ${s.frameW} mm wide · ${state.fps} frames per second`,
+              textContent: `${PAPERS[s.paper].name} ${s.landscape ? 'landscape' : 'portrait'} · ${framesPerPage(s)} per sheet · ${state.fps} frames per second`,
             }),
           ]),
     );
     pdfLink.hidden = true;
     pdfNote.textContent = '';
     renderStep();
-    void renderPreview();
+    if (steps[state.step].stage === 'sheet') void renderPreview();
   }
 
   async function createPdf() {
@@ -349,7 +389,7 @@ export function printPanel() {
     const n = frameCount();
     const id = state.projectId;
     try {
-      const grab = await frameGrabber(v, state.start, state.fps, s.aspect, (s.frameW / 25.4) * 300); // ~300 dpi
+      const grab = await frameGrabber(v, state.start, state.fps, crop(), (s.frameW / 25.4) * 300); // ~300 dpi
       const bytes = await buildSheetsPdf({
         spec: s,
         style: state.style,
@@ -379,9 +419,15 @@ export function printPanel() {
   const panel = el(
     'div',
     { class: 'panel' },
-    el('aside', { class: 'side' }, el('div', { class: 'side-scroll' }, title, body), el('div', { class: 'side-foot' }, progress, el('div', { class: 'nav' }, back, next))),
-    el('div', { class: 'stage' }, sheet, pager),
+    el(
+      'aside',
+      { class: 'side' },
+      el('div', { class: 'side-scroll' }, el('div', { class: 'step-head' }, title, stepHint), body),
+      el('div', { class: 'side-foot' }, progress, el('div', { class: 'nav' }, back, next)),
+    ),
+    stage,
   );
   changed();
+  renderStage();
   return { el: panel, open, state };
 }

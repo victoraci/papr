@@ -28,6 +28,7 @@ const SPEC: SheetSpec = makeSpec(
   Number(process.env.FW ?? 76),
   Number(process.env.GAP ?? 8),
 );
+if (process.env.VERSION) SPEC.version = Number(process.env.VERSION); // e.g. VERSION=1 for old 6 mm sheets
 const PER = SPEC.cols * SPEC.rows;
 console.log(`sheet ${SPEC.paper} ${SPEC.landscape ? 'landscape' : 'portrait'}, ${SPEC.cols}×${SPEC.rows} frames of ${SPEC.frameW} mm, gap ${SPEC.gap} mm`);
 const filter = process.argv[2] ?? '';
@@ -39,7 +40,7 @@ mkdirSync(OUT, { recursive: true });
 // --- sheets ---
 const pdf = await buildSheetsPdf({
   spec: SPEC,
-  style: { borders: !!process.env.BORDERS, frameNumbers: true, sheetNumber: true, fileName: true },
+  style: { borders: !!process.env.BORDERS, frameNumbers: true, fileName: true, markers: (process.env.MARKERS ?? 'all') as 'all' | 'crossings' | 'ring' },
   projectId: 'LAB001',
   fps: FPS,
   frameCount: N,
@@ -189,7 +190,7 @@ for (const sc of scenarios) {
     }
     let correct = 0;
     for (const f of res.frames) {
-      if (readBarcode(f.image) === f.index) correct++;
+      if (readBarcode(cropTo(f.image, f.inner)) === f.index) correct++;
       frames.set(f.index, f.image);
     }
     const gridTotal = layout.gridMarkers.length + 4;
@@ -261,6 +262,14 @@ ${html.join('\n')}`,
 console.log(`\nopen ${OUT}/index.html`);
 
 // ---------------------------------------------------------------------------
+
+/** Copy of a sub-rectangle (frames come with their white border). */
+function cropTo(img: RGBAImage, r: { x: number; y: number; w: number; h: number }): RGBAImage {
+  if (r.x === 0 && r.y === 0 && r.w === img.width && r.h === img.height) return img;
+  const out = new Uint8ClampedArray(r.w * r.h * 4);
+  for (let y = 0; y < r.h; y++) out.set(img.data.subarray(((r.y + y) * img.width + r.x) * 4, ((r.y + y) * img.width + r.x + r.w) * 4), y * r.w * 4);
+  return { width: r.w, height: r.h, data: out };
+}
 
 function writePng(path: string, img: RGBAImage) {
   writeFileSync(path, encode({ width: img.width, height: img.height, data: img.data as Uint8ClampedArray, channels: 4, depth: 8 }));

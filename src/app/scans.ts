@@ -73,10 +73,13 @@ async function pdfPages(file: File): Promise<(() => Promise<RGBAImage>)[]> {
 export interface Project {
   id: string;
   payload: SheetPayload;
+  /** frames including the white border, if the sheets were printed with one */
   frames: Map<number, ImageBitmap>;
   pages: Set<number>;
-  frameW: number;
-  frameH: number;
+  /** the frame itself inside each image, px */
+  inner: { x: number; y: number; w: number; h: number };
+  /** whole image incl. border, px */
+  full: { w: number; h: number };
 }
 
 /** Long side of the rebuilt frames. Same for every sheet, whatever the scan resolution. */
@@ -108,8 +111,8 @@ export async function processScan(entry: ScanEntry, projects: Map<string, Projec
     const p = result.payload;
     let project = projects.get(p.projectId);
     if (!project) {
-      const size = frameSize(p.spec.aspect);
-      project = { id: p.projectId, payload: p, frames: new Map(), pages: new Set(), frameW: size.w, frameH: size.h };
+      const f = result.frames[0];
+      project = { id: p.projectId, payload: p, frames: new Map(), pages: new Set(), inner: f.inner, full: { w: f.image.width, h: f.image.height } };
       projects.set(p.projectId, project);
     }
     project.pages.add(p.page);

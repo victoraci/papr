@@ -15,6 +15,7 @@ import {
   computeLayout,
   markerCorners,
   pageSize,
+  paperBorder,
   parseAnchorId,
   qrRect,
   type Layout,
@@ -41,6 +42,11 @@ export interface ExtractedFrame {
   cornerMarkers: number;
   /** image px outline TL TR BR BL */
   quad: Pt[];
+  /**
+   * Where the frame itself sits in `image` (px). If the sheet was printed with
+   * a white border, `image` includes that border around it.
+   */
+  inner: { x: number; y: number; w: number; h: number };
 }
 
 export interface PageResult {
@@ -195,6 +201,11 @@ export async function detectPage(img: RGBAImage, opts: DetectOptions = {}): Prom
     const fh = even(fw / payload.spec.aspect);
     const cols = payload.spec.cols;
     const found = new Set(result.inlierIds);
+    // cut out the white border too, so it can be kept in the final video
+    const border = paperBorder(payload.spec.gap, payload.spec.version);
+    const bx = Math.round((border * fw) / layout.cellW);
+    const by = Math.round((border * fh) / layout.cellH);
+    const inner = { x: bx, y: by, w: fw, h: fh };
 
     layout.cells.forEach((cell, k) => {
       const index = first + k;
@@ -202,9 +213,10 @@ export async function detectPage(img: RGBAImage, opts: DetectOptions = {}): Prom
       const r = Math.floor(k / cols);
       const c = k % cols;
       const ring = [r * (cols + 1) + c, r * (cols + 1) + c + 1, (r + 1) * (cols + 1) + c, (r + 1) * (cols + 1) + c + 1];
-      const image = warpCell(cv, src, field, cell, fw, fh);
+      const outer = { x: cell.x - border, y: cell.y - border, w: cell.w + 2 * border, h: cell.h + 2 * border };
+      const image = warpCell(cv, src, field, outer, fw + 2 * bx, fh + 2 * by);
       const quad = rectCorners(cell).map(([x, y]) => field.map(x, y));
-      result.frames.push({ index, image, cornerMarkers: ring.filter((id) => found.has(id)).length, quad });
+      result.frames.push({ index, image, cornerMarkers: ring.filter((id) => found.has(id)).length, quad, inner });
     });
     lap('frames');
     return result;

@@ -5,7 +5,7 @@
 //   ver id     sheet/sheets cols rows paper+orientation aspect*1000 fps frames
 //   frame width*10 (mm) gap*10 (mm)
 
-import { LAYOUT_VERSION, PAPERS, type PaperId, type SheetSpec } from './layout.ts';
+import { PAPERS, SUPPORTED_VERSIONS, type PaperId, type SheetSpec } from './layout.ts';
 
 export interface SheetPayload {
   version: number;
@@ -50,7 +50,7 @@ export function decodePayload(text: string): SheetPayload | null {
   const m = /^RP(\d+)$/.exec(parts[0]);
   if (!m) return null;
   const version = Number(m[1]);
-  if (version !== LAYOUT_VERSION) return null;
+  if (!SUPPORTED_VERSIONS.includes(version)) return null;
   const [, projectId, page, pages, cols, rows, paperO, aspect, fps, frames, frameW, gap] = parts;
   const paper = paperO.slice(0, -1) as PaperId;
   const orient = paperO.slice(-1);
@@ -70,6 +70,7 @@ export function decodePayload(text: string): SheetPayload | null {
       aspect: nums[4] / 1000,
       frameW: nums[7] / 10,
       gap: nums[8] / 10,
+      version,
     },
     fps: nums[5],
     frameCount: nums[6],
