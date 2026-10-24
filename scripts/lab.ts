@@ -348,7 +348,7 @@ for (const sc of scenarios) {
       frames.set(f.index, f.image);
     }
     const gridTotal = layout.gridMarkers.length + 4;
-    const markerCol = res.linesLooked ? `${res.inlierIds.length}/4 · ${Math.round((100 * (res.linePoints?.length ?? 0)) / res.linesLooked)}%` : `${res.inlierIds.length}/${gridTotal}`;
+    const markerCol = res.linesLooked ? `${res.inlierIds.length}/${gridTotal} · ${Math.round((100 * (res.linePoints?.length ?? 0)) / res.linesLooked)}%` : `${res.inlierIds.length}/${gridTotal}`;
     rows.push({
       scenario: sc.name,
       page: p,

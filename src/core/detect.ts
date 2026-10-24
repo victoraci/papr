@@ -226,10 +226,13 @@ export interface PageFit {
   seenAround(k: number): number;
   linePoints?: Pt[];
   linesLooked?: number;
+  /** grid marker fits: the page homography and the marker points the spline went through */
+  homography?: Mat3;
+  controls?: ControlPoint[];
 }
 
-/** Versions 1 and 2: homography + spline through every grid marker. */
-function fitByMarkers(cv: CV, markers: DetectedMarker[], layout: Layout, opts: DetectOptions): PageFit {
+/** Grid markers (all layouts but 3): homography + spline through every marker. */
+export function fitByMarkers(cv: CV, markers: DetectedMarker[], layout: Layout, opts: DetectOptions): PageFit {
   const warnings: string[] = [];
   const out: PageFit = { field: null, pxPerMm: NaN, inlierIds: [], warnings, seenAround: () => 0 };
   const known = matchToLayout(markers, layout);
@@ -267,6 +270,8 @@ function fitByMarkers(cv: CV, markers: DetectedMarker[], layout: Layout, opts: D
   // square residual is ~σ/√2 per corner; a correct fit leaves ~√2·σ per corner, ~σ/2 per centre
   const noisePx = useCorners ? Math.max(0.2, 2.2 * noise) : Math.max(0.15, 1.5 * noise);
   out.field = fitWarpField(global, controls, { noisePx, smoothing: opts.smoothing });
+  out.homography = global;
+  out.controls = controls;
   const cols = layout.spec.cols;
   const found = new Set(out.inlierIds);
   out.seenAround = (k) => {

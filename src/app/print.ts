@@ -9,6 +9,7 @@ import {
   gridChoices,
   LAYOUT_VERSION,
   PAPERS,
+  PHOTO_LAYOUT,
   specForGrid,
   validateSpec,
   type BorderId,
@@ -37,6 +38,8 @@ const CROPS: { value: string; ratio: number }[] = [
 const MAX_GRID_OPTIONS = 8;
 
 type View = 'video' | 'sheets';
+/** How the painted sheets come back in; photos get a sheet with more to hold on to. */
+type Capture = 'scanner' | 'photo';
 
 /** Up to `max` options, spread evenly over the list. */
 function spread<T>(list: T[], max: number): T[] {
@@ -57,6 +60,7 @@ export function printPanel() {
     cropY: 0.5,
     paper: 'A4' as PaperId,
     landscape: true,
+    capture: 'scanner' as Capture,
     count: 9,
     border: 'none' as BorderId,
     style: { borders: false, frameNumbers: true, fileName: true } as SheetStyle,
@@ -75,13 +79,14 @@ export function printPanel() {
     return state.video ? state.video.width / state.video.height : 16 / 9;
   };
   const crop = (): Crop => ({ aspect: aspect(), x: state.cropX, y: state.cropY });
-  const gap = () => gapForBorder(BORDERS[state.border]);
-  const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, aspect(), gap()), MAX_GRID_OPTIONS);
+  const version = () => (state.capture === 'photo' ? PHOTO_LAYOUT : LAYOUT_VERSION);
+  const gap = () => gapForBorder(BORDERS[state.border], version());
+  const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, aspect(), gap(), 20, version()), MAX_GRID_OPTIONS);
   const choice = (): GridChoice => {
     const list = choices();
     return list.reduce((best, c) => (Math.abs(c.count - state.count) < Math.abs(best.count - state.count) ? c : best), list[0]);
   };
-  const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, aspect(), gap(), choice());
+  const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, aspect(), gap(), choice(), version());
   const frameCount = () => (state.video ? Math.max(1, Math.floor((state.end - state.start) * state.fps + 1e-6)) : 1);
   const pdfKey = () => JSON.stringify([state.video?.url, state.start, state.end, state.fps, crop(), spec(), state.style]);
 
@@ -178,6 +183,15 @@ export function printPanel() {
     () => (state.landscape ? 'L' : 'P'),
     (v) => ((state.landscape = v === 'L'), changed('sheets')),
   );
+  const captureCtl = options<Capture>(
+    [
+      { value: 'scanner', label: 'Scanner' },
+      { value: 'photo', label: 'Phone or tablet' },
+    ],
+    () => state.capture,
+    (v) => ((state.capture = v), changed('sheets')),
+  );
+  const captureHint = hint();
   const gridCtl = options([], () => choice().count, (v) => ((state.count = v), changed('sheets')));
   const frameSizeNote = hint();
   const borderCtl = options<BorderId>(
@@ -203,7 +217,13 @@ export function printPanel() {
       el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Change', onclick: picker.open })),
       fileNote,
       group('Video', field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.')), field('Crop', cropCtl.el, cropHint)),
-      group('Paper', field('Size', paperCtl.el), field('Orientation', orientCtl.el), field('Frames per sheet', gridCtl.el, frameSizeNote)),
+      group(
+        'Paper',
+        field('Size', paperCtl.el),
+        field('Orientation', orientCtl.el),
+        field('Scan with', captureCtl.el, captureHint),
+        field('Frames per sheet', gridCtl.el, frameSizeNote),
+      ),
       more(
         field('White border', borderCtl.el, hint('Blank paper around each frame to paint past the edge. You can keep it in the finished video.')),
         el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)),
@@ -273,7 +293,7 @@ export function printPanel() {
     const draw = async () => {
       const svg = await renderSheetSvg(
         layout,
-        { version: LAYOUT_VERSION, projectId: state.projectId, page: state.page, pages, spec: s, fps: state.fps, frameCount: n },
+        { version: s.version ?? LAYOUT_VERSION, projectId: state.projectId, page: state.page, pages, spec: s, fps: state.fps, frameCount: n },
         state.style,
         state.video?.file.name,
         (i) => thumbs.get(thumbKey(i)),
@@ -308,7 +328,11 @@ export function printPanel() {
     const n = frameCount();
     const pages = pageCount(s, n);
 
-    for (const c of [fpsCtl, cropCtl, paperCtl, orientCtl, borderCtl, ...toggles]) c.sync();
+    for (const c of [fpsCtl, cropCtl, paperCtl, orientCtl, captureCtl, borderCtl, ...toggles]) c.sync();
+    captureHint.textContent =
+      state.capture === 'photo'
+        ? 'Small squares between the frames keep photos of curved or painted paper in line.'
+        : 'Only the four corners get printed. Photos work too, as long as the paper lies flat.';
     cropHint.hidden = state.crop === 'original';
     gridCtl.setOptions(choices().map((c) => ({ value: c.count, label: String(c.count) })));
     frameSizeNote.textContent = `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;

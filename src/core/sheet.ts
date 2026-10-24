@@ -3,7 +3,7 @@
 
 import qrcode from 'qrcode-generator';
 import { ARUCO_4X4_250 } from './aruco-dict.ts';
-import { LAYOUT_VERSION, paperBorder, type Layout, type MarkerPlace, type Rect } from './layout.ts';
+import { hasGridMarkers, LAYOUT_VERSION, paperBorder, type Layout, type MarkerPlace, type Rect } from './layout.ts';
 import { encodePayload, firstFrameOfPage, type SheetPayload } from './payload.ts';
 
 export interface SheetStyle {
@@ -40,8 +40,11 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
   const first = firstFrameOfPage(payload);
   const count = Math.min(layout.cells.length, payload.frameCount - first);
 
-  // version 3: the picture edges are what the detector follows, nothing else between the frames
-  const v3 = (layout.spec.version ?? LAYOUT_VERSION) >= 3;
+  // since version 3 the picture edges are what the detector follows; version 3 has nothing else
+  // between the frames, version 4 adds the grid markers
+  const version = layout.spec.version ?? LAYOUT_VERSION;
+  const v3 = version >= 3;
+  const markers = hasGridMarkers(version);
   for (let i = 0; i < count; i++) await c.frame(first + i, layout.cells[i]);
   if (style.borders)
     for (let i = 0; i < count; i++) {
@@ -50,7 +53,7 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
       c.outline(v3 ? { x: r.x + 0.2, y: r.y + 0.2, w: r.w - 0.4, h: r.h - 0.4 } : r, 0.2);
     }
 
-  if (!v3) for (const m of printedMarkers(layout, style.markers ?? 'all')) marker(c, m);
+  if (markers) for (const m of printedMarkers(layout, style.markers ?? 'all')) marker(c, m);
   for (const m of layout.anchors) marker(c, m);
   qr(c, encodePayload(payload), layout.qr);
 
@@ -65,7 +68,7 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
   if (style.frameNumbers) {
     for (let i = 0; i < count; i++) {
       const cell = layout.cells[i];
-      if (v3) {
+      if (!markers) {
         // in the middle of the paper between the borders; 6 pt digits are ~1.5 mm tall
         c.text(String(first + i + 1), cell.x, cell.y + cell.h + layout.spec.gap / 2 + 0.76, 6, { grey: true });
       } else {
@@ -75,7 +78,7 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
       }
     }
   }
-  c.text(v3 ? 'Keep the corner squares and the QR code clean.' : 'Keep the black squares and the QR code clean.', footer.x, footer.y + footer.h - 1.4, 7, {
+  c.text(markers ? 'Keep the black squares and the QR code clean.' : 'Keep the corner squares and the QR code clean.', footer.x, footer.y + footer.h - 1.4, 7, {
     grey: true,
   });
 }

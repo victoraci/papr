@@ -17,9 +17,13 @@
 // Printed pictures come out a little bigger than drawn (ink spreads, the
 // scan blurs); neighbouring pictures tell by how much (edgeSpread).
 // Inside each frame the field is blended from its four edges (blendInside).
+//
+// Photo sheets (layout 4) also have the grid markers of layout 2: their fit
+// is the starting point, and their corners stay in the spline next to the
+// edges.
 
 import type { CV } from './cv.ts';
-import { estimatePxPerMm, fitHomography, matchToLayout, type DetectedMarker, type DetectOptions, type PageFit } from './detect.ts';
+import { estimatePxPerMm, fitByMarkers, fitHomography, matchToLayout, type DetectedMarker, type DetectOptions, type PageFit } from './detect.ts';
 import { apply, median, type Mat3, type Pt } from './geom.ts';
 import type { RGBAImage } from './image.ts';
 import { markerCorners, type Layout, type Rect } from './layout.ts';
@@ -28,7 +32,7 @@ import { fitLineField, homographyField, pointObs, type LineObs, type WarpField }
 const STEP = 1; // mm between measurements along an edge
 const NEAR_CORNER = 1; // mm; the other edge of the corner gets into the profile there
 const WINDOW = 0.6; // mm of picture / paper looked at on each side of an edge
-const MAX_OBS = 450; // keeps the spline solve quick
+const MAX_OBS = 520; // keeps the spline solve quick
 const MAX_SLOPE = 0.25; // how fast an edge may drift off the rough fit, mm per mm (wavy paper)
 
 /** One side of a printed picture. */
@@ -93,34 +97,50 @@ export function fitByEdges(
 ): PageFit {
   const warnings: string[] = [];
   const out: PageFit = { field: null, pxPerMm: NaN, inlierIds: [], warnings, seenAround: () => 0 };
-  const anchors = matchToLayout(markers, layout);
-  if (!anchors.length) {
-    warnings.push('no corner squares of this sheet found');
-    return out;
+  let H: Mat3 | null;
+  let fixed: LineObs[];
+  // where the edges are expected to be, and what they are checked against
+  let ref: WarpField;
+  if (layout.gridMarkers.length) {
+    const base = fitByMarkers(cv, markers, layout, opts);
+    warnings.push(...base.warnings);
+    if (!base.field || !base.homography) return out;
+    Object.assign(out, { pxPerMm: base.pxPerMm, inlierIds: base.inlierIds, field: base.field });
+    H = base.homography;
+    ref = base.field;
+    fixed = (base.controls ?? []).flatMap((c) => pointObs(c.mm, c.px));
+  } else {
+    const anchors = matchToLayout(markers, layout);
+    if (!anchors.length) {
+      warnings.push('no corner squares of this sheet found');
+      return out;
+    }
+    out.pxPerMm = estimatePxPerMm(anchors);
+    H = fitHomography(
+      cv,
+      anchors.map((k) => ({ mm: markerCorners(k.place), px: k.marker.corners })),
+      0,
+    );
+    if (!H) {
+      warnings.push('could not fit the page');
+      return out;
+    }
+    out.inlierIds = anchors.map((k) => k.place.id);
+    out.field = ref = homographyField(H);
+    fixed = anchors.flatMap((k) => markerCorners(k.place).flatMap((mm, i) => pointObs(mm, k.marker.corners[i])));
   }
-  out.pxPerMm = estimatePxPerMm(anchors);
-  const H = fitHomography(
-    cv,
-    anchors.map((k) => ({ mm: markerCorners(k.place), px: k.marker.corners })),
-    0,
-  );
-  if (!H) {
-    warnings.push('could not fit the page');
-    return out;
-  }
-  out.inlierIds = anchors.map((k) => k.place.id);
-  out.field = homographyField(H);
   if (opts.edges === false) return out;
+  const base = H;
 
-  const anchorObs = anchors.flatMap((k) => markerCorners(k.place).flatMap((mm, i) => pointObs(mm, k.marker.corners[i])));
   const img = darkest(image);
   const edges = pictureEdges(layout, frames);
   const sites = edgeSites(edges);
-  let field: WarpField = out.field;
+  let field: WarpField = out.field!;
   let found: Found[] = [];
 
-  // pass 1 reaches as far as the paper may plausibly be off, short of the next picture
-  const radii = [Math.max(1, Math.min(3.5, layout.spec.gap - 1.5)), 0.8, 0.5];
+  // pass 1 reaches as far as the paper may plausibly be off, short of the next picture;
+  // the marker fit of a photo sheet is close already
+  const radii = [layout.gridMarkers.length ? 1.2 : Math.max(1, Math.min(3.5, layout.spec.gap - 1.5)), 0.8, 0.5];
   for (let pass = 0; pass < radii.length; pass++) {
     const ms = sites.map((site) => measure(img, field, edges[site.edge], site, radii[pass]));
     const picked = pass === 0 ? pickRuns(ms, edges.length) : ms.filter((m) => m.cands.length);
@@ -128,8 +148,8 @@ export function fitByEdges(
       const off = m.cands[0].off;
       const px: Pt = [m.q[0] + off * m.n[0], m.q[1] + off * m.n[1]];
       const value = m.n[0] * px[0] + m.n[1] * px[1];
-      // judged against the stiff anchor fit: the spline may already have followed a bad point
-      const h = apply(H, m.site.mm[0], m.site.mm[1]);
+      // judged against the first fit: the spline may already have followed a bad point
+      const h = ref.map(m.site.mm[0], m.site.mm[1]);
       return { site: m.site, dir: m.n, value, off: (value - (m.n[0] * h[0] + m.n[1] * h[1])) / m.scale, scale: m.scale, px };
     });
     found = smoothAlongEdges(found);
@@ -141,12 +161,12 @@ export function fitByEdges(
       f.value -= b * f.scale;
       f.off -= b;
     }
-    const obs = group(found);
+    const obs = group(found, Math.max(150, MAX_OBS - fixed.length));
     const noisePx = Math.max(0.12, 1.5 * spread(found));
-    field = fitLineField(H, [...anchorObs, ...obs], { noisePx, smoothing: opts.smoothing });
+    field = fitLineField(base, [...fixed, ...obs], { noisePx, smoothing: opts.smoothing });
   }
 
-  out.field = opts.interior === 'spline' ? field : blendInside(field, H, layout);
+  out.field = opts.interior === 'spline' ? field : blendInside(field, base, layout);
   out.linePoints = found.map((f) => pointAt(field, f));
   out.linesLooked = sites.length;
   if (found.length < sites.length * 0.3)
@@ -452,8 +472,8 @@ function facingAgree(found: Found[], layout: Layout, grow: { x: number; y: numbe
 }
 
 /** Neighbouring measurements on an edge become one observation, so the spline stays small. */
-function group(found: Found[]): LineObs[] {
-  const piece = Math.max(4.5, (found.length * STEP) / MAX_OBS);
+function group(found: Found[], maxObs: number): LineObs[] {
+  const piece = Math.max(4.5, (found.length * STEP) / maxObs);
   const byEdge = new Map<number, Found[]>();
   for (const f of found) {
     const list = byEdge.get(f.site.edge) ?? [];
