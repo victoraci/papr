@@ -32,7 +32,7 @@ export interface Option<T> {
   label: string;
 }
 
-/** A row of plain text options; the chosen one is lit. */
+/** A segmented row of options; the chosen one is filled. */
 export function options<T extends string | number>(
   list: Option<T>[],
   get: () => T,
@@ -44,6 +44,8 @@ export function options<T extends string | number>(
   const build = () => {
     buttons = opts.map((o) => el('button', { class: 'opt', role: 'radio', textContent: o.label, onclick: () => (set(o.value), sync()) }));
     wrap.replaceChildren(...buttons);
+    // long lists become two even rows
+    wrap.style.setProperty('--cols', String(opts.length > 5 ? Math.ceil(opts.length / 2) : Math.max(1, opts.length)));
   };
   const sync = () => buttons.forEach((b, i) => b.setAttribute('aria-checked', String(opts[i].value === get())));
   build();
@@ -64,6 +66,16 @@ export function options<T extends string | number>(
 /** A label over a control, with an optional quiet line below. */
 export function field(label: string, ...children: Child[]) {
   return el('div', { class: 'field' }, el('div', { class: 'field-label', textContent: label }), ...children);
+}
+
+/** Settings that belong together, under a short title. */
+export function group(title: string, ...children: Child[]) {
+  return el('section', { class: 'group' }, el('h2', { class: 'group-title', textContent: title }), ...children);
+}
+
+/** The settings column: scrolling settings on top, the main button pinned below. */
+export function sidebar(body: Child[], foot: Child[]) {
+  return el('aside', { class: 'side' }, el('div', { class: 'side-body' }, ...body), el('div', { class: 'side-foot' }, ...foot));
 }
 
 export const hint = (text = '') => el('p', { class: 'hint', textContent: text });

@@ -94,6 +94,7 @@ const MESSAGES: Record<string, string> = {
   'no markers found': 'No PAPR sheet found in this image.',
   'QR code not readable': 'The QR code can’t be read. Keep it clean and in focus.',
   'no markers of this sheet found': 'The black squares can’t be read.',
+  'no corner squares of this sheet found': 'The corner squares can’t be read. Keep all four in the picture.',
   'could not fit the page': 'The sheet is too distorted to read.',
 };
 

@@ -5,17 +5,21 @@
 //  - 4 anchor markers in the page corners. Their IDs encode paper format,
 //    orientation and which corner they are, so a scan can be rectified
 //    before anything else is known.
-//  - a grid of frames with a small marker on every gap crossing (and halfway
-//    along each gap). They let the detector follow wavy or bent paper.
+//  - a grid of frames. Since version 3 nothing else is printed between them:
+//    the detector measures the edges of the pictures against the white paper
+//    to fit wavy or bent paper. Versions 1 and 2 had a small marker on every
+//    gap crossing and halfway along each gap for that.
 //  - a QR code (bottom right) carrying everything needed to rebuild the
 //    animation: project id, sheet number, grid, frame size, fps, frame count.
 
 /**
- * 2: grid markers 4 mm (were 6 mm in 1). Sheets of both versions can be read;
- * the version is in the QR code.
+ * 2: grid markers 4 mm (were 6 mm in 1).
+ * 3: no grid markers, the picture edges do their job; gaps 5 mm instead of
+ *    8, corner anchors 7 mm instead of 10.
+ * Sheets of every version can be read; the version is in the QR code.
  */
-export const LAYOUT_VERSION = 2;
-export const SUPPORTED_VERSIONS = [1, 2];
+export const LAYOUT_VERSION = 3;
+export const SUPPORTED_VERSIONS = [1, 2, 3];
 
 export type PaperId = 'A3' | 'A4' | 'A5' | 'LT';
 
@@ -29,12 +33,22 @@ export const PAPERS: Record<PaperId, { w: number; h: number; name: string }> = {
 const PAPER_ORDER: PaperId[] = ['A4', 'A3', 'LT', 'A5'];
 
 export const EDGE = 8; // page edge to anchors (printers can't print right up to the edge)
-export const ANCHOR = 10; // anchor marker size
+export const ANCHOR = 10; // anchor marker size up to version 2; the QR code keeps its place from then
 export const QR_SIZE = 18;
 export const BAND_GAP = 3; // space between header/footer bands and the grid
-export const GAP_MIN = 7;
 export const GAP_MAX = 30;
 export const FRAME_MIN = 12;
+
+/** Version 3: plain paper between the frames, mm. */
+const GAP_V3 = 5;
+
+export function anchorSize(version = LAYOUT_VERSION): number {
+  return version >= 3 ? 7 : ANCHOR;
+}
+
+export function gapMin(version = LAYOUT_VERSION): number {
+  return version >= 3 ? GAP_V3 : 7;
+}
 
 export const ANCHOR_ID_BASE = 200;
 export const MAX_GRID_MARKERS = ANCHOR_ID_BASE;
@@ -77,6 +91,7 @@ export interface Layout {
   cells: Rect[];
   cellW: number;
   cellH: number;
+  /** versions 1 and 2 */
   gridMarkers: MarkerPlace[];
   anchors: MarkerPlace[];
   qr: Rect;
@@ -121,16 +136,17 @@ export function qrRect(paper: PaperId, landscape: boolean): Rect {
 }
 
 /** Space left for the frame grid (including the outer ring of gap). */
-export function gridArea(paper: PaperId, landscape: boolean): Rect {
+export function gridArea(paper: PaperId, landscape: boolean, version = LAYOUT_VERSION): Rect {
   const { w, h } = pageSize(paper, landscape);
-  const top = EDGE + ANCHOR + BAND_GAP;
+  const top = EDGE + anchorSize(version) + BAND_GAP;
   const bottom = h - EDGE - QR_SIZE - BAND_GAP;
   return { x: EDGE, y: top, w: w - 2 * EDGE, h: bottom - top };
 }
 
 /**
- * White paper border around each frame, mm. The grid markers sit outside it,
- * so the border can be painted on and kept in the final video.
+ * White paper border around each frame, mm. The grid markers sit outside it
+ * (version 3: a strip of paper between the borders), so the border can be
+ * painted on and kept in the final video.
  */
 export const BORDERS = { none: 0, small: 3, large: 6 } as const;
 export type BorderId = keyof typeof BORDERS;
@@ -140,13 +156,19 @@ function markerAir(version = LAYOUT_VERSION) {
   return version === 1 ? 1 : 2;
 }
 
-/** Gap between frames for a border: border on both sides + marker + air on each side. */
-export function gapForBorder(border: number): number {
-  return markerSize(Infinity) + 2 * markerAir() + 2 * border;
+/**
+ * Gap between frames for a border. Up to version 2: border on both sides +
+ * marker + air on each side. Version 3: 5 mm without a border, else both
+ * borders + 2 mm, so neighbouring borders stay apart.
+ */
+export function gapForBorder(border: number, version = LAYOUT_VERSION): number {
+  if (version >= 3) return border > 0 ? Math.max(GAP_V3 + 0.1, 2 * border + 2) : GAP_V3;
+  return markerSize(Infinity, version) + 2 * markerAir(version) + 2 * border;
 }
 
 /** Clean paper around each frame for a given gap (inverse of gapForBorder). */
 export function paperBorder(gap: number, version = LAYOUT_VERSION): number {
+  if (version >= 3) return gap <= GAP_V3 + 1e-6 ? 0 : (gap - 2) / 2;
   return Math.max(0, (gap - markerSize(gap, version) - 2 * markerAir(version)) / 2);
 }
 
@@ -162,13 +184,13 @@ export interface GridChoice {
  * Sensible "frames per sheet" options: for every grid the biggest frames that
  * fit, without options that give fewer frames and aren't bigger either.
  */
-export function gridChoices(paper: PaperId, landscape: boolean, aspect: number, gap: number, minFrame = 20): GridChoice[] {
-  const area = gridArea(paper, landscape);
+export function gridChoices(paper: PaperId, landscape: boolean, aspect: number, gap: number, minFrame = 20, version = LAYOUT_VERSION): GridChoice[] {
+  const area = gridArea(paper, landscape, version);
   const best = new Map<number, GridChoice>();
   for (let cols = 1; cols <= 10; cols++)
     for (let rows = 1; rows <= 15; rows++) {
       const w = Math.floor(Math.min((area.w - (cols + 1) * gap) / cols, ((area.h - (rows + 1) * gap) / rows) * aspect));
-      if (w < minFrame || w / aspect < FRAME_MIN || (cols + 1) * (rows + 1) > MAX_GRID_MARKERS) continue;
+      if (w < minFrame || w / aspect < FRAME_MIN || (version < 3 && (cols + 1) * (rows + 1) > MAX_GRID_MARKERS)) continue;
       const count = cols * rows;
       const prev = best.get(count);
       if (!prev || w > prev.frameW) best.set(count, { cols, rows, count, frameW: w });
@@ -192,15 +214,15 @@ export function maxFrameWidth(paper: PaperId, landscape: boolean, aspect: number
  * A spec with as many frames per sheet as fit. Values are rounded the way
  * the QR code stores them, so print and detection use identical numbers.
  */
-export function makeSpec(paper: PaperId, landscape: boolean, aspect: number, frameW: number, gap: number): SheetSpec {
+export function makeSpec(paper: PaperId, landscape: boolean, aspect: number, frameW: number, gap: number, version = LAYOUT_VERSION): SheetSpec {
   aspect = Math.round(aspect * 1000) / 1000;
   frameW = Math.round(frameW * 10) / 10;
   gap = Math.round(gap * 10) / 10;
-  const area = gridArea(paper, landscape);
+  const area = gridArea(paper, landscape, version);
   const frameH = frameW / aspect;
   const cols = Math.max(0, Math.floor((area.w - gap + 1e-6) / (frameW + gap)));
   const rows = Math.max(0, Math.floor((area.h - gap + 1e-6) / (frameH + gap)));
-  return { paper, landscape, aspect, frameW, gap, cols, rows, version: LAYOUT_VERSION };
+  return { paper, landscape, aspect, frameW, gap, cols, rows, version };
 }
 
 export function cellSize(spec: SheetSpec): { w: number; h: number } {
@@ -210,22 +232,24 @@ export function cellSize(spec: SheetSpec): { w: number; h: number } {
 export function validateSpec(spec: SheetSpec): string | null {
   if (!PAPERS[spec.paper]) return `Unknown paper ${spec.paper}.`;
   if (!(spec.aspect > 0.1 && spec.aspect < 10)) return 'Unusual aspect ratio.';
-  if (!(spec.gap >= GAP_MIN && spec.gap <= GAP_MAX)) return `Spacing must be between ${GAP_MIN} and ${GAP_MAX} mm.`;
+  const min = gapMin(spec.version);
+  if (!(spec.gap >= min - 1e-6 && spec.gap <= GAP_MAX)) return `Spacing must be between ${min} and ${GAP_MAX} mm.`;
   const c = cellSize(spec);
   if (c.w < FRAME_MIN || c.h < FRAME_MIN) return `Frames must be at least ${FRAME_MIN} mm on each side.`;
   if (!(spec.cols >= 1 && spec.rows >= 1)) return 'Frames this big don’t fit on the sheet.';
-  const area = gridArea(spec.paper, spec.landscape);
+  const area = gridArea(spec.paper, spec.landscape, spec.version);
   if (spec.cols * (c.w + spec.gap) + spec.gap > area.w + 1e-6 || spec.rows * (c.h + spec.gap) + spec.gap > area.h + 1e-6)
     return 'Frames don’t fit on the sheet.';
-  if ((spec.cols + 1) * (spec.rows + 1) > MAX_GRID_MARKERS) return 'Too many frames per sheet.';
+  if ((spec.version ?? LAYOUT_VERSION) < 3 && (spec.cols + 1) * (spec.rows + 1) > MAX_GRID_MARKERS) return 'Too many frames per sheet.';
   return null;
 }
 
 export function computeLayout(spec: SheetSpec): Layout {
   const err = validateSpec(spec);
   if (err) throw new Error(err);
+  const version = spec.version ?? LAYOUT_VERSION;
   const { w: W, h: H } = pageSize(spec.paper, spec.landscape);
-  const area = gridArea(spec.paper, spec.landscape);
+  const area = gridArea(spec.paper, spec.landscape, version);
   const { w: cw, h: ch } = cellSize(spec);
   const G = spec.gap;
 
@@ -239,9 +263,9 @@ export function computeLayout(spec: SheetSpec): Layout {
     for (let c = 0; c < spec.cols; c++)
       cells.push({ x: gx + G + c * (cw + G), y: gy + G + r * (ch + G), w: cw, h: ch });
 
-  const gridMarkers = gridMarkerPlaces(spec, gx, gy);
+  const gridMarkers = version >= 3 ? [] : gridMarkerPlaces(spec, gx, gy);
 
-  const A = ANCHOR;
+  const A = anchorSize(version);
   const anchorPos: [number, number][] = [
     [EDGE, EDGE],
     [W - EDGE - A, EDGE],

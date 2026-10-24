@@ -5,7 +5,7 @@
 import { cutSound, exportGif, exportMp4, exportPngZip, type DrawFrame } from './export.ts';
 import { frameSize, missingPages, processScan, toEntries, type Project, type ScanEntry } from './scans.ts';
 import { printed } from './session.ts';
-import { dropTarget, el, field, filePicker, hint, mb, more, options, plural, saveFile, slider, toggleRow, type Control } from './ui.ts';
+import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, slider, toggleRow, type Control } from './ui.ts';
 
 const SIZES = { small: 640, medium: 960, large: 1280 } as const;
 type Size = keyof typeof SIZES;
@@ -183,24 +183,24 @@ export function scanPanel() {
     () => (opts.trim ? `${opts.trim} %` : 'Off'),
   );
 
-  const controls = el(
-    'aside',
-    { class: 'controls' },
-    field('Sheets', sheetList, readingNote, errorList, el('button', { class: 'link', textContent: 'Add more sheets', onclick: picker.open })),
-    el('div', { class: 'action' }, download, summary, exportNote),
-    more(
-      field('Frames per second', fpsCtl.el, fpsHint),
-      boomerangCtl.el,
-      field('Repeat', repeatCtl.el, hint('For MP4. GIFs loop on their own.')),
-      field('Sound', soundToggle.el, soundButton, soundNote),
-      field('File', formatCtl.el, formatHint),
-      field('Size', sizeCtl.el, sizeLabel),
-      borderCtl.el,
-      trimCtl.el,
-    ),
+  const controls = sidebar(
+    [
+      group('Sheets', sheetList, readingNote, errorList, el('button', { class: 'link', textContent: 'Add more sheets', onclick: picker.open })),
+      more(
+        field('Frames per second', fpsCtl.el, fpsHint),
+        boomerangCtl.el,
+        field('Repeat', repeatCtl.el, hint('For MP4. GIFs loop on their own.')),
+        field('Sound', soundToggle.el, soundButton, soundNote),
+        field('File', formatCtl.el, formatHint),
+        field('Size', sizeCtl.el, sizeLabel),
+        borderCtl.el,
+        trimCtl.el,
+      ),
+    ],
+    [download, summary, exportNote],
   );
 
-  const work = el('div', { class: 'work', hidden: true }, view, controls);
+  const work = el('div', { class: 'work', hidden: true }, controls, view);
 
   // --- render ---
   function render() {

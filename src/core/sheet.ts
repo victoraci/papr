@@ -3,19 +3,20 @@
 
 import qrcode from 'qrcode-generator';
 import { ARUCO_4X4_250 } from './aruco-dict.ts';
-import { paperBorder, type Layout, type MarkerPlace, type Rect } from './layout.ts';
+import { LAYOUT_VERSION, paperBorder, type Layout, type MarkerPlace, type Rect } from './layout.ts';
 import { encodePayload, firstFrameOfPage, type SheetPayload } from './payload.ts';
 
 export interface SheetStyle {
-  /** thin outline around each frame */
+  /** thin outline around each frame; helps the detector with pictures that are white at the edges */
   borders: boolean;
   frameNumbers: boolean;
   /** the video's file name in the header */
   fileName: boolean;
   /**
-   * Which grid markers get printed: every crossing plus halfway along each
-   * gap, crossings only, or only the outer ring. Detection works with any of
-   * them (missing markers are simply not found); denser is more accurate.
+   * Up to version 2, which grid markers get printed: every crossing plus
+   * halfway along each gap, crossings only, or only the outer ring. Detection
+   * works with any of them (missing markers are simply not found); denser is
+   * more accurate. Lab only.
    */
   markers?: 'all' | 'crossings' | 'ring';
 }
@@ -39,28 +40,44 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
   const first = firstFrameOfPage(payload);
   const count = Math.min(layout.cells.length, payload.frameCount - first);
 
+  // version 3: the picture edges are what the detector follows, nothing else between the frames
+  const v3 = (layout.spec.version ?? LAYOUT_VERSION) >= 3;
   for (let i = 0; i < count; i++) await c.frame(first + i, layout.cells[i]);
-  if (style.borders) for (let i = 0; i < count; i++) c.outline(layout.cells[i], 0.2);
+  if (style.borders)
+    for (let i = 0; i < count; i++) {
+      // version 3 draws it just inside, so the picture edge stays where the layout says
+      const r = layout.cells[i];
+      c.outline(v3 ? { x: r.x + 0.2, y: r.y + 0.2, w: r.w - 0.4, h: r.h - 0.4 } : r, 0.2);
+    }
 
-  for (const m of printedMarkers(layout, style.markers ?? 'all')) marker(c, m);
+  if (!v3) for (const m of printedMarkers(layout, style.markers ?? 'all')) marker(c, m);
   for (const m of layout.anchors) marker(c, m);
   qr(c, encodePayload(payload), layout.qr);
 
   const { header, footer } = layout;
   const last = first + count;
-  c.text(style.fileName && title ? `PAPR · ${title}` : 'PAPR', header.x, header.y + 3.2, 8);
+  // header text sits on the middle of the anchors (10 mm up to version 2)
+  const base = header.y + (v3 ? header.h / 2 + 1 : 3.2);
+  c.text(style.fileName && title ? `PAPR · ${title}` : 'PAPR', header.x, base, 8);
   // always printed: people need it to keep the sheets in order
-  c.text(`${payload.projectId} · sheet ${payload.page} of ${payload.pages}`, header.x + header.w, header.y + 3.2, 8, { right: true });
+  c.text(`${payload.projectId} · sheet ${payload.page} of ${payload.pages}`, header.x + header.w, base, 8, { right: true });
   c.text(`frames ${first + 1}–${last} of ${payload.frameCount} · ${payload.fps} fps`, footer.x, footer.y + footer.h - 4.6, 7, { grey: true });
   if (style.frameNumbers) {
-    // below the white border, so it never ends up in the video; 6 pt digits are ~2.1 mm tall
-    const below = paperBorder(layout.spec.gap, layout.spec.version) + 3.2;
     for (let i = 0; i < count; i++) {
       const cell = layout.cells[i];
-      c.text(String(first + i + 1), cell.x, cell.y + cell.h + below, 6, { grey: true });
+      if (v3) {
+        // in the middle of the paper between the borders; 6 pt digits are ~1.5 mm tall
+        c.text(String(first + i + 1), cell.x, cell.y + cell.h + layout.spec.gap / 2 + 0.76, 6, { grey: true });
+      } else {
+        // below the white border, so it never ends up in the video
+        const below = paperBorder(layout.spec.gap, layout.spec.version) + 3.2;
+        c.text(String(first + i + 1), cell.x, cell.y + cell.h + below, 6, { grey: true });
+      }
     }
   }
-  c.text('Keep the black squares and the QR code clean.', footer.x, footer.y + footer.h - 1.4, 7, { grey: true });
+  c.text(v3 ? 'Keep the corner squares and the QR code clean.' : 'Keep the black squares and the QR code clean.', footer.x, footer.y + footer.h - 1.4, 7, {
+    grey: true,
+  });
 }
 
 function printedMarkers(layout: Layout, which: 'all' | 'crossings' | 'ring'): MarkerPlace[] {

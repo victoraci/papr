@@ -22,7 +22,7 @@ import type { SheetStyle } from '../core/sheet.ts';
 import { renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
 import { timeline } from './timeline.ts';
-import { dropTarget, el, field, filePicker, hint, mb, more, options, plural, saveFile, toggleRow, type Control } from './ui.ts';
+import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, toggleRow, type Control } from './ui.ts';
 import { frameGrabber, loadVideo, type Crop, type LoadedVideo } from './video.ts';
 import { videoView } from './videoview.ts';
 
@@ -198,27 +198,26 @@ export function printPanel() {
   const summary = hint();
   const pdfNote = hint();
 
-  const controls = el(
-    'aside',
-    { class: 'controls' },
-    el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Change', onclick: picker.open })),
-    fileNote,
-    field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.')),
-    field('Crop', cropCtl.el, cropHint),
-    field('Paper', paperCtl.el, orientCtl.el),
-    field('Frames per sheet', gridCtl.el, frameSizeNote),
-    el('div', { class: 'action' }, download, summary, pdfNote),
-    more(
-      field('White border', borderCtl.el, hint('Blank paper around each frame to paint past the edge. You can keep it in the finished video.')),
-      el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)),
-    ),
+  const controls = sidebar(
+    [
+      el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Change', onclick: picker.open })),
+      fileNote,
+      group('Video', field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.')), field('Crop', cropCtl.el, cropHint)),
+      group('Paper', field('Size', paperCtl.el), field('Orientation', orientCtl.el), field('Frames per sheet', gridCtl.el, frameSizeNote)),
+      more(
+        field('White border', borderCtl.el, hint('Blank paper around each frame to paint past the edge. You can keep it in the finished video.')),
+        el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)),
+        hint('The thin line helps photos line up when your video is white at the edges.'),
+      ),
+    ],
+    [download, summary, pdfNote],
   );
 
   const work = el(
     'div',
     { class: 'work', hidden: true },
-    el('div', { class: 'view' }, el('div', { class: 'view-head' }, viewCtl.el), videoPane, sheetPane),
     controls,
+    el('div', { class: 'view' }, el('div', { class: 'view-head' }, viewCtl.el), videoPane, sheetPane),
   );
 
   async function open(file: File) {

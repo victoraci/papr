@@ -17,6 +17,8 @@ export interface Scenario {
   /** wavy paper: in-plane displacement amplitude and wavelength, mm */
   bendMm?: number;
   waveMm?: number;
+  /** turns the wave pattern (deg), so it no longer follows the page edges */
+  waveAngle?: number;
   /** paint strokes over the frames; some will hit gutters and markers */
   strokes?: number;
   /** how far strokes may spill over the frame edge, as a fraction of the frame (default 0.25) */
@@ -87,13 +89,16 @@ export function fakeScan(
   const amp = (sc.bendMm ?? 0) * pxmm;
   const lam = (sc.waveMm ?? 100) * pxmm;
   const ph = [rand() * 6.28, rand() * 6.28, rand() * 6.28];
-  const d = (x: number, y: number): Pt =>
-    amp === 0
-      ? [0, 0]
-      : [
-          amp * (0.6 * Math.sin((2 * Math.PI * y) / lam + ph[0]) + 0.4 * Math.sin((2 * Math.PI * x) / (1.7 * lam) + ph[2])),
-          amp * Math.sin((2 * Math.PI * x) / lam + ph[1]),
-        ];
+  const ca = Math.cos(((sc.waveAngle ?? 0) * Math.PI) / 180);
+  const sa = Math.sin(((sc.waveAngle ?? 0) * Math.PI) / 180);
+  const d = (x0: number, y0: number): Pt => {
+    if (amp === 0) return [0, 0];
+    const x = ca * x0 + sa * y0;
+    const y = -sa * x0 + ca * y0;
+    const a = amp * (0.6 * Math.sin((2 * Math.PI * y) / lam + ph[0]) + 0.4 * Math.sin((2 * Math.PI * x) / (1.7 * lam) + ph[2]));
+    const b = amp * Math.sin((2 * Math.PI * x) / lam + ph[1]);
+    return [ca * a - sa * b, sa * a + ca * b];
+  };
 
   const mapx = new cv.Mat(sc.outH, sc.outW, cv.CV_32FC1);
   const mapy = new cv.Mat(sc.outH, sc.outW, cv.CV_32FC1);
