@@ -89,7 +89,7 @@ export function timeline(get: () => Range, set: (r: Range) => void, minLength: (
     const run = ++stripRun;
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(1, Math.round(track.clientWidth * dpr));
-    const h = Math.round(56 * dpr);
+    const h = Math.round(track.clientHeight * dpr);
     strip.width = w;
     strip.height = h;
     const ctx = strip.getContext('2d')!;

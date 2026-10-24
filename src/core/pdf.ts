@@ -40,8 +40,8 @@ export async function buildSheetsPdf(input: SheetsInput): Promise<Uint8Array> {
   const pages = pageCount(input.spec, input.frameCount);
 
   const doc = await PDFDocument.create();
-  doc.setTitle(`rotopaper ${input.projectId}`);
-  doc.setCreator('rotopaper');
+  doc.setTitle(`PAPR ${input.projectId}`);
+  doc.setCreator('PAPR');
   const font = await doc.embedFont(StandardFonts.Helvetica);
 
   let done = 0;

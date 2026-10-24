@@ -250,12 +250,12 @@ const table = rows
   .join('');
 writeFileSync(
   `${OUT}/index.html`,
-  `<!doctype html><meta charset="utf-8"><title>rotopaper lab</title>
+  `<!doctype html><meta charset="utf-8"><title>PAPR lab</title>
 <style>body{font:14px Inter,system-ui,sans-serif;margin:24px;background:#111;color:#ddd}
 img,video{height:300px;border-radius:4px;background:#000}.row{display:flex;gap:12px;flex-wrap:wrap}
 table{border-collapse:collapse;margin-bottom:24px}td,th{padding:4px 10px;text-align:left;border-bottom:1px solid #333}
 .bad{color:#f77}h2{font-weight:500;margin:28px 0 8px}</style>
-<h1 style="font-weight:500">rotopaper · detection lab</h1>
+<h1 style="font-weight:500">PAPR · detection lab</h1>
 <table><tr><th>scenario</th><th>page</th><th>QR</th><th>frames right</th><th>error mean / max</th><th>markers</th><th>time</th><th>notes</th></tr>${table}</table>
 ${html.join('\n')}`,
 );

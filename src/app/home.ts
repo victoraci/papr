@@ -1,11 +1,11 @@
-// Start page: one line on what Rotopaper does, the three steps, two ways in.
+// Start page: one line on what PAPR does, the three steps, two ways in.
 
 import { el } from './ui.ts';
 
 export function homePage() {
   const step = (n: number, text: string) => el('li', {}, el('span', { class: 'muted', textContent: String(n) }), el('span', { textContent: text }));
   const page = el(
-    'div',
+    'section',
     { class: 'home' },
     el(
       'div',
@@ -20,11 +20,11 @@ export function homePage() {
       ),
       el(
         'div',
-        { class: 'row' },
+        { class: 'actions' },
         el('a', { class: 'button primary', href: '#/print', textContent: 'Start with a video' }),
         el('a', { class: 'button', href: '#/scan', textContent: 'Add finished sheets' }),
       ),
-      el('p', { class: 'muted small', textContent: 'Free. Runs in your browser, nothing gets uploaded.' }),
+      el('p', { class: 'hint', textContent: 'Free. Runs in your browser, nothing gets uploaded.' }),
     ),
   );
   return { el: page };

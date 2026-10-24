@@ -91,7 +91,7 @@ export function frameSize(aspect: number, longSide = FRAME_LONG_SIDE): { w: numb
 }
 
 const MESSAGES: Record<string, string> = {
-  'no markers found': 'No Rotopaper sheet found in this image.',
+  'no markers found': 'No PAPR sheet found in this image.',
   'QR code not readable': 'The QR code can’t be read. Keep it clean and in focus.',
   'no markers of this sheet found': 'The black squares can’t be read.',
   'could not fit the page': 'The sheet is too distorted to read.',
@@ -105,7 +105,7 @@ export async function processScan(entry: ScanEntry, projects: Map<string, Projec
     if (!result.payload || !result.frames.length) {
       entry.status = 'failed';
       const w = result.warnings[result.warnings.length - 1] ?? '';
-      entry.error = MESSAGES[w] ?? 'No Rotopaper sheet found in this image.';
+      entry.error = MESSAGES[w] ?? 'No PAPR sheet found in this image.';
       return;
     }
     const p = result.payload;

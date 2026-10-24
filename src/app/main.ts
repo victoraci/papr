@@ -1,7 +1,7 @@
 import '@fontsource-variable/inter';
 import './style.css';
 import kauzalSvg from './assets/kauzal.svg?raw';
-import logoSvg from './assets/rotopaper.svg?raw';
+import logoSvg from './assets/papr.svg?raw';
 import { homePage } from './home.ts';
 import { printPanel } from './print.ts';
 import { scanPanel } from './scan.ts';
@@ -24,20 +24,20 @@ const pill = el('span', { class: 'mode-pill' });
 const modeButtons = (['print', 'scan'] as const).map((r) =>
   el('button', { textContent: r === 'print' ? 'Print' : 'Scan', onclick: () => (location.hash = `#/${r}`) }),
 );
-const modeSwitch = el('div', { class: 'mode-switch', role: 'tablist' }, pill, ...modeButtons);
+const modeSwitch = el('nav', { class: 'mode-switch' }, pill, ...modeButtons);
 
 function show() {
   const r = route();
   for (const [name, view] of Object.entries(views)) view.hidden = name !== r;
   modeSwitch.hidden = r === 'home';
-  modeButtons.forEach((b, i) => {
-    const on = (i === 0 ? 'print' : 'scan') === r;
-    b.classList.toggle('on', on);
-    b.setAttribute('aria-selected', String(on));
-  });
+  modeButtons.forEach((b, i) => b.classList.toggle('on', (i === 0 ? 'print' : 'scan') === r));
   modeSwitch.style.setProperty('--at', r === 'scan' ? '1' : '0');
 }
 window.addEventListener('hashchange', show);
+
+// a file dropped next to a drop area must not replace the page
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
 
 document.getElementById('app')!.append(
   el(
@@ -46,11 +46,10 @@ document.getElementById('app')!.append(
     el(
       'div',
       { class: 'brand' },
-      el('a', { class: 'logo', href: '#/', ariaLabel: 'Rotopaper home' }, svgSpan(logoSvg, 'logo-svg')),
+      el('a', { class: 'logo', href: '#/', ariaLabel: 'PAPR home' }, svgSpan(logoSvg, 'logo-svg')),
       el('a', { class: 'by', href: 'https://kauzal.com', target: '_blank', rel: 'noopener' }, el('span', { textContent: 'by' }), svgSpan(kauzalSvg, 'kauzal')),
     ),
     modeSwitch,
-    el('div'),
   ),
   home.el,
   print.el,
@@ -61,5 +60,5 @@ show();
 // dev hook so the flow can be driven without a file dialog
 if (import.meta.env.DEV)
   Object.assign(window, {
-    rotopaper: { openVideo: print.open, addScans: scan.add, state: print.state, go: (r: Route) => (location.hash = `#/${r}`) },
+    papr: { openVideo: print.open, addScans: scan.add, state: print.state, go: (r: Route) => (location.hash = `#/${r}`) },
   });

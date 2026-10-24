@@ -48,7 +48,7 @@ export async function drawSheet(c: SheetCanvas, { layout, payload, title, style 
 
   const { header, footer } = layout;
   const last = first + count;
-  c.text(style.fileName && title ? `rotopaper · ${title}` : 'rotopaper', header.x, header.y + 3.2, 8);
+  c.text(style.fileName && title ? `PAPR · ${title}` : 'PAPR', header.x, header.y + 3.2, 8);
   // always printed: people need it to keep the sheets in order
   c.text(`${payload.projectId} · sheet ${payload.page} of ${payload.pages}`, header.x + header.w, header.y + 3.2, 8, { right: true });
   c.text(`frames ${first + 1}–${last} of ${payload.frameCount} · ${payload.fps} fps`, footer.x, footer.y + footer.h - 4.6, 7, { grey: true });

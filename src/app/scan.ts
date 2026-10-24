@@ -1,16 +1,18 @@
-// Scan panel: sheets back in → timing → sound → export. The stage shows the
-// finished animation and a strip with every frame.
+// Scan: finished sheets in, video out, on one screen. Drop the scans, the
+// animation plays right away, one button downloads it. Everything else sits
+// under "More settings".
 
 import { cutSound, exportGif, exportMp4, exportPngZip, type DrawFrame } from './export.ts';
 import { frameSize, missingPages, processScan, toEntries, type Project, type ScanEntry } from './scans.ts';
 import { printed } from './session.ts';
-import { chips, dropZone, el, mb, plural, slider, toggleRow, type Control } from './ui.ts';
+import { dropTarget, el, field, filePicker, hint, mb, more, options, plural, saveFile, slider, toggleRow, type Control } from './ui.ts';
 
 const SIZES = { small: 640, medium: 960, large: 1280 } as const;
 type Size = keyof typeof SIZES;
 type Format = 'mp4' | 'gif' | 'png';
 const FPS_CHOICES = [6, 8, 12, 15, 24];
 const REPEATS = [1, 2, 3, 5];
+const ACCEPT = 'image/*,application/pdf,.pdf';
 
 export function scanPanel() {
   const scans: ScanEntry[] = [];
@@ -27,9 +29,12 @@ export function scanPanel() {
     trim: 0,
     keepBorder: false,
   };
-  let step = 0;
   let queue = Promise.resolve();
-  let lastUrl = '';
+  let busy = false;
+  /** The last export; downloading again without changes gives the same file. */
+  let last: { key: string; url: string; name: string } | null = null;
+  /** Settings the note under the button speaks about. */
+  let noteKey = '';
 
   const current = (): Project | null => {
     let best: Project | null = null;
@@ -43,14 +48,22 @@ export function scanPanel() {
     return opts.boomerang && base.length > 2 ? [...base, ...base.slice(1, -1).reverse()] : base;
   };
   const soundAllowed = (p: Project) => fps(p) === p.payload.fps && !opts.boomerang;
+  const withSound = (p: Project) => opts.format === 'mp4' && opts.sound && !!opts.soundFile && soundAllowed(p);
+  const exportKey = (p: Project) => JSON.stringify([p.id, p.frames.size, opts, opts.soundFile?.name, withSound(p)]);
 
-  // --- step 1: sheets ---
-  const drop = dropZone('Drop scans, photos or PDFs here or click to choose them', 'image/*,application/pdf,.pdf', true, (f) => void add(f));
-  const sheetList = el('div', { class: 'sheet-list' });
-  const errorList = el('div', { class: 'scans' });
-  const sheetInfo = el('p', { class: 'muted' });
+  // --- before anything is in ---
+  const picker = filePicker(ACCEPT, true, (f) => void add(f));
+  const intake = el(
+    'div',
+    { class: 'intake' },
+    el('h1', { textContent: 'Drop your sheets here' }),
+    el('p', { class: 'hint', textContent: 'Scans, photos or PDFs, in any order.' }),
+    el('button', { class: 'primary', textContent: 'Choose files', onclick: picker.open }),
+  );
 
   async function add(files: File[]) {
+    intake.hidden = true;
+    work.hidden = false;
     const entries = await toEntries(files);
     for (const entry of entries) {
       scans.push(entry);
@@ -76,134 +89,12 @@ export function scanPanel() {
     }
   }
 
-  // --- step 2: timing ---
-  const fpsCtl = chips(
-    FPS_CHOICES.map((f) => ({ value: f, label: String(f) })),
-    () => {
-      const p = current();
-      return p ? fps(p) : 12;
-    },
-    (v) => ((opts.fps = v), changed()),
-    5,
-  );
-  const fpsHint = el('p', { class: 'muted small' });
-  const boomerangCtl = toggleRow('Boomerang (forward, then back)', () => opts.boomerang, (v) => ((opts.boomerang = v), changed()));
-  const repeatCtl = chips(
-    REPEATS.map((r) => ({ value: r, label: `${r}×` })),
-    () => opts.repeat,
-    (v) => ((opts.repeat = v), changed()),
-    4,
-  );
-
-  // --- step 3: sound ---
-  const soundToggle = toggleRow('Sound', () => opts.sound, (v) => ((opts.sound = v), changed()));
-  const soundName = el('p', { class: 'muted small' });
-  const soundDrop = dropZone('Drop the original video here to use its sound', 'video/*', false, (f) => {
-    const p = current();
-    opts.soundFile = f[0];
-    opts.soundStart = (p && (printed.get(p.id)?.start ?? p.payload.start)) ?? 0;
-    opts.sound = true;
-    changed();
-  });
-  const soundNote = el('p', { class: 'muted small' });
-
-  // --- step 4: export ---
-  const formatCtl = chips(
-    [
-      { value: 'mp4' as Format, label: 'MP4' },
-      { value: 'gif' as Format, label: 'GIF' },
-      { value: 'png' as Format, label: 'Frames' },
-    ],
-    () => opts.format,
-    (v) => {
-      opts.format = v;
-      // GIFs get big fast, so they start small
-      opts.size = v === 'gif' ? 'small' : 'large';
-      changed();
-    },
-    3,
-  );
-  const formatHint = el('p', { class: 'muted small' });
-  const sizeCtl = chips(
-    [
-      { value: 'small' as Size, label: 'Small' },
-      { value: 'medium' as Size, label: 'Medium' },
-      { value: 'large' as Size, label: 'Large' },
-    ],
-    () => opts.size,
-    (v) => ((opts.size = v), changed()),
-    3,
-  );
-  const sizeLabel = el('p', { class: 'muted small' });
-  const borderCtl = toggleRow('Keep the white border', () => opts.keepBorder, (v) => ((opts.keepBorder = v), changed()));
-  const trimCtl = slider(
-    'Trim edges',
-    { min: () => 0, max: () => 6, step: 0.5 },
-    () => opts.trim,
-    (v) => ((opts.trim = v), changed()),
-    () => (opts.trim ? `${opts.trim} %` : 'Off'),
-  );
-  const fileLink = el('a', { class: 'button primary wide', hidden: true });
-  const exportNote = el('p', { class: 'muted' });
-
-  const label = (t: string) => el('span', { textContent: t });
-  const steps: { title: string; hint?: string; body: Node[] }[] = [
-    { title: 'Sheets', hint: 'Scans or photos of your sheets, in any order.', body: [drop.el, sheetList, sheetInfo, errorList] },
-    {
-      title: 'Timing',
-      body: [
-        el('div', { class: 'stack' }, label('Frames per second'), fpsCtl.el, fpsHint),
-        boomerangCtl.el,
-        el('div', { class: 'stack' }, label('Repeat'), repeatCtl.el, el('p', { class: 'muted small', textContent: 'For MP4. GIFs loop on their own.' })),
-      ],
-    },
-    { title: 'Sound', hint: 'The sound of the part you printed, under your animation.', body: [soundToggle.el, soundName, soundDrop.el, soundNote] },
-    {
-      title: 'Export',
-      body: [
-        el('div', { class: 'stack' }, formatCtl.el, formatHint),
-        el('div', { class: 'stack' }, label('Size'), sizeCtl.el, sizeLabel),
-        borderCtl.el,
-        trimCtl.el,
-        fileLink,
-        exportNote,
-      ],
-    },
-  ];
-
-  // --- sidebar shell ---
-  const title = el('h2');
-  const stepHint = el('p', { class: 'muted small' });
-  const body = el('div', { class: 'step-body' });
-  const progress = el('div', { class: 'progress' });
-  const segs = steps.map((_, i) => el('button', { ariaLabel: `Step ${i + 1}`, onclick: () => current() && go(i) }));
-  progress.append(...segs);
-  const back = el('button', { textContent: 'Back', onclick: () => go(step - 1) });
-  const next = el('button', { class: 'primary' });
-  next.onclick = () => (step === steps.length - 1 ? void runExport() : go(step + 1));
-
-  function go(i: number) {
-    step = Math.max(0, Math.min(steps.length - 1, i));
-    renderStep();
-  }
-
-  function renderStep() {
-    const s = steps[step];
-    title.textContent = s.title;
-    stepHint.textContent = s.hint ?? '';
-    body.replaceChildren(...s.body);
-    segs.forEach((b, i) => b.classList.toggle('done', i <= step));
-    back.disabled = step === 0;
-    next.textContent = step < steps.length - 1 ? 'Next' : opts.format === 'png' ? 'Export frames' : `Export ${opts.format.toUpperCase()}`;
-    next.disabled = !current();
-  }
-
-  // --- stage: player + frame strip ---
-  const player = el('canvas', { class: 'stepped', title: 'Click to pause' });
+  // --- view: player + frame strip ---
+  const player = el('canvas', { class: 'player', title: 'Click to pause' });
   const strip = el('div', { class: 'frame-strip' });
-  const empty = el('p', { class: 'muted', textContent: 'The animation plays here once sheets are added.' });
-  const playerWrap = el('div', { class: 'video-stage scan', hidden: true }, player, strip);
-  const stage = el('div', { class: 'stage' }, playerWrap, empty);
+  const waiting = el('p', { class: 'hint waiting' });
+  const playerHolder = el('div', { class: 'picture-holder' }, player, waiting);
+  const view = el('div', { class: 'view scan-view' }, playerHolder, strip);
   let thumbs: HTMLElement[] = [];
 
   function buildStrip(p: Project) {
@@ -221,6 +112,95 @@ export function scanPanel() {
     });
     strip.replaceChildren(...thumbs);
   }
+
+  // --- controls ---
+  const sheetList = el('div', { class: 'sheet-list' });
+  const readingNote = hint();
+  const errorList = el('div', { class: 'errors' });
+
+  const download = el('button', { class: 'primary wide', onclick: () => void runExport() });
+  const summary = hint();
+  const exportNote = hint();
+
+  const fpsCtl = options(
+    FPS_CHOICES.map((f) => ({ value: f, label: String(f) })),
+    () => {
+      const p = current();
+      return p ? fps(p) : 12;
+    },
+    (v) => ((opts.fps = v), changed()),
+  );
+  const fpsHint = hint();
+  const boomerangCtl = toggleRow('Boomerang (forward, then back)', () => opts.boomerang, (v) => ((opts.boomerang = v), changed()));
+  const repeatCtl = options(
+    REPEATS.map((r) => ({ value: r, label: `${r}×` })),
+    () => opts.repeat,
+    (v) => ((opts.repeat = v), changed()),
+  );
+
+  const soundToggle = toggleRow('Sound', () => opts.sound, (v) => ((opts.sound = v), changed()));
+  const soundPicker = filePicker('video/*', false, (f) => {
+    const p = current();
+    opts.soundFile = f[0];
+    opts.soundStart = (p && (printed.get(p.id)?.start ?? p.payload.start)) ?? 0;
+    opts.sound = true;
+    changed();
+  });
+  const soundButton = el('button', { class: 'link', onclick: soundPicker.open });
+  const soundNote = hint();
+
+  const formatCtl = options<Format>(
+    [
+      { value: 'mp4', label: 'MP4' },
+      { value: 'gif', label: 'GIF' },
+      { value: 'png', label: 'Frames' },
+    ],
+    () => opts.format,
+    (v) => {
+      opts.format = v;
+      // GIFs get big fast, so they start small
+      opts.size = v === 'gif' ? 'small' : 'large';
+      changed();
+    },
+  );
+  const formatHint = hint();
+  const sizeCtl = options<Size>(
+    [
+      { value: 'small', label: 'Small' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'large', label: 'Large' },
+    ],
+    () => opts.size,
+    (v) => ((opts.size = v), changed()),
+  );
+  const sizeLabel = hint();
+  const borderCtl = toggleRow('Keep the white border', () => opts.keepBorder, (v) => ((opts.keepBorder = v), changed()));
+  const trimCtl = slider(
+    'Trim edges',
+    { min: () => 0, max: () => 6, step: 0.5 },
+    () => opts.trim,
+    (v) => ((opts.trim = v), changed()),
+    () => (opts.trim ? `${opts.trim} %` : 'Off'),
+  );
+
+  const controls = el(
+    'aside',
+    { class: 'controls' },
+    field('Sheets', sheetList, readingNote, errorList, el('button', { class: 'link', textContent: 'Add more sheets', onclick: picker.open })),
+    el('div', { class: 'action' }, download, summary, exportNote),
+    more(
+      field('Frames per second', fpsCtl.el, fpsHint),
+      boomerangCtl.el,
+      field('Repeat', repeatCtl.el, hint('For MP4. GIFs loop on their own.')),
+      field('Sound', soundToggle.el, soundButton, soundNote),
+      field('File', formatCtl.el, formatHint),
+      field('Size', sizeCtl.el, sizeLabel),
+      borderCtl.el,
+      trimCtl.el,
+    ),
+  );
+
+  const work = el('div', { class: 'work', hidden: true }, view, controls);
 
   // --- render ---
   function render() {
@@ -241,24 +221,23 @@ export function scanPanel() {
         : []),
     );
     const working = scans.filter((s) => s.status === 'waiting' || s.status === 'working').length;
-    sheetInfo.textContent = working ? `Reading ${plural(working, 'file', 'files')}…` : '';
+    readingNote.textContent = working ? `Reading ${plural(working, 'file', 'files')}…` : '';
     errorList.replaceChildren(
       ...scans
         .filter((s) => s.status === 'failed' || (s.status === 'done' && s.result?.payload?.projectId !== p?.id))
         .map((s) =>
           el(
             'div',
-            { class: 'failed' },
+            {},
             el('span', { textContent: s.name }),
-            el('span', { class: 'warn', textContent: s.status === 'failed' ? (s.error ?? 'No Rotopaper sheet found in this image.') : 'From another project, left out.' }),
+            el('span', { class: 'warn', textContent: s.status === 'failed' ? (s.error ?? 'No PAPR sheet found in this image.') : 'From another project, left out.' }),
           ),
         ),
     );
-    if (p) {
-      playerWrap.hidden = false;
-      empty.hidden = true;
-      buildStrip(p);
-    }
+    player.hidden = !p;
+    waiting.hidden = !!p;
+    waiting.textContent = working ? 'Reading your sheets…' : 'No sheet found yet.';
+    if (p) buildStrip(p);
     changed();
   }
 
@@ -268,27 +247,39 @@ export function scanPanel() {
     const s = source(p);
     return frameSize(s.w / s.h, SIZES[opts.size]);
   };
+  const label = () => (opts.format === 'png' ? 'frames' : opts.format.toUpperCase());
 
   function changed() {
     const p = current();
     for (const c of [fpsCtl, boomerangCtl, repeatCtl, soundToggle, formatCtl, sizeCtl, borderCtl, trimCtl] as Control[]) c.sync();
+    if (!busy) download.textContent = `Download ${label()}`;
+    download.disabled = !p || busy;
     if (p) {
       const n = sequence(p).length;
-      fpsHint.textContent = `Printed at ${p.payload.fps}. ${plural(n, 'frame', 'frames')} take ${(n / fps(p)).toFixed(1)} s.`;
+      const reps = opts.format === 'mp4' ? opts.repeat : 1;
       const s = outSize(p);
+      fpsHint.textContent = `Printed at ${p.payload.fps}.`;
       sizeLabel.textContent = `${s.w} × ${s.h} pixels`;
       borderCtl.el.hidden = p.inner.x === 0;
       formatHint.textContent = opts.format === 'png' ? 'Every frame as a PNG image, in one ZIP. For further editing.' : '';
+      summary.textContent = [
+        plural(n * reps, 'frame', 'frames'),
+        `${((n * reps) / fps(p)).toFixed(1)} s`,
+        `${s.w} × ${s.h}`,
+        withSound(p) ? 'with sound' : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
 
       // sound
       const allowed = soundAllowed(p);
       const has = !!opts.soundFile;
       soundToggle.el.hidden = !has || !allowed;
-      soundName.textContent = has && allowed ? opts.soundFile!.name : '';
-      soundDrop.el.hidden = has || !allowed;
+      soundButton.hidden = !allowed;
+      soundButton.textContent = has ? `${opts.soundFile!.name} · change` : 'Add the original video for its sound';
       soundNote.textContent = !allowed
         ? `Sound only fits at ${p.payload.fps} frames per second and without boomerang.`
-        : opts.format !== 'mp4'
+        : has && opts.format !== 'mp4'
           ? 'Only MP4 has sound.'
           : has && p.payload.start === undefined && !printed.has(p.id)
             ? 'These sheets don’t say where in the video they start, so the sound starts at the beginning.'
@@ -299,12 +290,16 @@ export function scanPanel() {
       if (player.width !== ps.w || player.height !== ps.h) {
         player.width = ps.w;
         player.height = ps.h;
+        playerHolder.style.setProperty('--ar', `${ps.w} / ${ps.h}`); // phones size the holder by it
+      }
+      // after a change the last file's name (or error) no longer applies
+      if (!busy && noteKey !== exportKey(p)) {
+        noteKey = '';
+        exportNote.className = 'hint';
+        exportNote.textContent = missingPages(p).length ? 'Missing frames repeat the frame before them.' : '';
       }
     }
-    fileLink.hidden = true;
-    exportNote.textContent = '';
     shown = -1;
-    renderStep();
   }
 
   const drawer = (p: Project, order: number[]): DrawFrame => {
@@ -312,8 +307,8 @@ export function scanPanel() {
     const t = opts.trim / 100;
     // a missing frame repeats the one before it
     const frames: (ImageBitmap | undefined)[] = [];
-    let last: ImageBitmap | undefined;
-    for (let i = 0; i < p.payload.frameCount; i++) frames.push((last = p.frames.get(i) ?? last));
+    let prev: ImageBitmap | undefined;
+    for (let i = 0; i < p.payload.frameCount; i++) frames.push((prev = p.frames.get(i) ?? prev));
     return (ctx, i, w, h) => {
       const f = frames[order[i % order.length]];
       if (!f) {
@@ -359,20 +354,24 @@ export function scanPanel() {
   };
   requestAnimationFrame(tick);
 
-  // --- export ---
+  // --- export: one click, straight to the download ---
   async function runExport() {
     const p = current();
-    if (!p) return;
-    next.disabled = true;
-    fileLink.hidden = true;
+    if (!p || busy) return;
+    const key = exportKey(p);
+    if (last?.key === key) return saveFile(last.url, last.name);
+    noteKey = key;
+    busy = true;
+    download.disabled = true;
+    exportNote.className = 'hint';
     const s = outSize(p);
     const order = sequence(p);
     const repeat = opts.format === 'mp4' ? opts.repeat : 1;
     try {
       let audio: AudioBuffer | undefined;
-      if (opts.format === 'mp4' && opts.sound && opts.soundFile && soundAllowed(p)) {
-        exportNote.textContent = 'Reading the sound…';
-        audio = await cutSound(opts.soundFile, opts.soundStart, p.payload.frameCount / p.payload.fps, repeat);
+      if (withSound(p)) {
+        download.textContent = 'Reading the sound…';
+        audio = await cutSound(opts.soundFile!, opts.soundStart, p.payload.frameCount / p.payload.fps, repeat);
       }
       const job = {
         frames: order.length * repeat,
@@ -381,35 +380,25 @@ export function scanPanel() {
         h: s.h,
         draw: drawer(p, order),
         audio,
-        onProgress: (d: number, n: number) => (exportNote.textContent = `Encoding frame ${d} of ${n}`),
+        onProgress: (d: number, n: number) => (download.textContent = `Making frame ${d} of ${n}`),
       };
-      const name = `rotopaper-${p.id}`;
+      const name = `papr-${p.id}`;
       const blob = opts.format === 'gif' ? await exportGif(job) : opts.format === 'png' ? await exportPngZip(job, name) : await exportMp4(job);
-      if (lastUrl) URL.revokeObjectURL(lastUrl);
-      lastUrl = URL.createObjectURL(blob);
-      fileLink.href = lastUrl;
-      fileLink.download = `${name}.${opts.format === 'png' ? 'zip' : opts.format}`;
-      fileLink.textContent = `Download ${opts.format === 'png' ? 'frames' : opts.format.toUpperCase()} · ${mb(blob.size)}`;
-      fileLink.hidden = false;
-      exportNote.textContent = missingPages(p).length ? 'Missing frames repeat the frame before them.' : '';
+      if (last) URL.revokeObjectURL(last.url);
+      last = { key, url: URL.createObjectURL(blob), name: `${name}.${opts.format === 'png' ? 'zip' : opts.format}` };
+      saveFile(last.url, last.name);
+      exportNote.textContent = `${last.name} · ${mb(blob.size)}`;
     } catch (e) {
+      exportNote.className = 'warn';
       exportNote.textContent = e instanceof Error ? e.message : String(e);
     } finally {
-      next.disabled = false;
+      busy = false;
+      changed();
     }
   }
 
-  const panel = el(
-    'div',
-    { class: 'panel' },
-    el(
-      'aside',
-      { class: 'side' },
-      el('div', { class: 'side-scroll' }, el('div', { class: 'step-head' }, title, stepHint), body),
-      el('div', { class: 'side-foot' }, progress, el('div', { class: 'nav' }, back, next)),
-    ),
-    stage,
-  );
-  renderStep();
-  return { el: panel, add };
+  const page = el('section', { class: 'page' }, intake, work);
+  dropTarget(page, ACCEPT, true, (f) => void add(f));
+  changed();
+  return { el: page, add };
 }

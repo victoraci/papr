@@ -27,51 +27,33 @@ export interface Control {
   sync(): void;
 }
 
-/** Big selectable cards with a title and a quiet second line. */
-export function cards<T extends string>(
-  options: { value: T; title: string; hint?: string }[],
-  get: () => T,
-  set: (v: T) => void,
-): Control {
-  const wrap = el('div', { class: 'cards' });
-  const buttons = options.map((o) =>
-    el(
-      'button',
-      { class: 'card', onclick: () => (set(o.value), sync()) },
-      el('span', { textContent: o.title }),
-      o.hint && el('span', { class: 'hint', textContent: o.hint }),
-    ),
-  );
-  const sync = () => buttons.forEach((b, i) => b.classList.toggle('on', options[i].value === get()));
-  wrap.append(...buttons);
-  sync();
-  return { el: wrap, sync };
+export interface Option<T> {
+  value: T;
+  label: string;
 }
 
-/** Equal-width option buttons in a grid, optionally with a small icon above the label. */
-export function chips<T extends string | number>(
-  options: { value: T; label: string; icon?: () => HTMLElement }[],
+/** A row of plain text options; the chosen one is lit. */
+export function options<T extends string | number>(
+  list: Option<T>[],
   get: () => T,
   set: (v: T) => void,
-  columns: number,
-): Control & { setOptions(o: { value: T; label: string; icon?: () => HTMLElement }[]): void } {
-  const wrap = el('div', { class: 'chips' });
-  wrap.style.gridTemplateColumns = `repeat(${columns}, 1fr)`;
-  let opts = options;
+): Control & { setOptions(list: Option<T>[]): void } {
+  const wrap = el('div', { class: 'options', role: 'radiogroup' });
+  let opts = list;
   let buttons: HTMLButtonElement[] = [];
   const build = () => {
-    buttons = opts.map((o) => el('button', { onclick: () => (set(o.value), sync()) }, o.icon?.(), el('span', { textContent: o.label })));
+    buttons = opts.map((o) => el('button', { class: 'opt', role: 'radio', textContent: o.label, onclick: () => (set(o.value), sync()) }));
     wrap.replaceChildren(...buttons);
   };
-  const sync = () => buttons.forEach((b, i) => b.classList.toggle('on', opts[i].value === get()));
+  const sync = () => buttons.forEach((b, i) => b.setAttribute('aria-checked', String(opts[i].value === get())));
   build();
   sync();
   return {
     el: wrap,
     sync,
-    setOptions(o) {
-      if (o.map((x) => `${x.value}:${x.label}`).join() !== opts.map((x) => `${x.value}:${x.label}`).join()) {
-        opts = o;
+    setOptions(next) {
+      if (next.map((x) => `${x.value}:${x.label}`).join() !== opts.map((x) => `${x.value}:${x.label}`).join()) {
+        opts = next;
         build();
       }
       sync();
@@ -79,14 +61,12 @@ export function chips<T extends string | number>(
   };
 }
 
-export function segmented<T extends string>(options: { value: T; label: string }[], get: () => T, set: (v: T) => void): Control {
-  const wrap = el('div', { class: 'segmented' });
-  const buttons = options.map((o) => el('button', { textContent: o.label, onclick: () => (set(o.value), sync()) }));
-  const sync = () => buttons.forEach((b, i) => b.classList.toggle('on', options[i].value === get()));
-  wrap.append(...buttons);
-  sync();
-  return { el: wrap, sync };
+/** A label over a control, with an optional quiet line below. */
+export function field(label: string, ...children: Child[]) {
+  return el('div', { class: 'field' }, el('div', { class: 'field-label', textContent: label }), ...children);
 }
+
+export const hint = (text = '') => el('p', { class: 'hint', textContent: text });
 
 /** On/off row: label left, switch right. The whole row is clickable. */
 export function toggleRow(label: string, get: () => boolean, set: (v: boolean) => void): Control {
@@ -120,68 +100,63 @@ export function slider(
   };
   sync();
   return {
-    el: el('div', { class: 'field' }, el('div', { class: 'field-head' }, el('span', { textContent: label }), value), input),
+    el: el('div', { class: 'field' }, el('div', { class: 'field-label split' }, el('span', { textContent: label }), value), input),
     sync,
   };
 }
 
-/** A big number with − and + on either side. */
-export function stepper(label: string, attrs: { min: number; max: number }, get: () => number, set: (v: number) => void, readout: () => string): Control {
-  const num = el('span', { class: 'big-number' });
-  const value = el('span', { class: 'muted' });
-  const change = (d: number) => {
-    set(Math.min(attrs.max, Math.max(attrs.min, get() + d)));
-    sync();
-  };
-  const minus = el('button', { class: 'round', textContent: '−', ariaLabel: `Less ${label}`, onclick: () => change(-1) });
-  const plus = el('button', { class: 'round', textContent: '+', ariaLabel: `More ${label}`, onclick: () => change(1) });
-  const sync = () => {
-    num.textContent = String(get());
-    value.textContent = readout();
-    minus.disabled = get() <= attrs.min;
-    plus.disabled = get() >= attrs.max;
-  };
-  sync();
-  return {
-    el: el(
-      'div',
-      { class: 'field' },
-      el('div', { class: 'field-head' }, el('span', { textContent: label }), value),
-      el('div', { class: 'stepper' }, minus, num, plus),
-    ),
-    sync,
-  };
+/** Folded-away settings. */
+export function more(...children: Child[]) {
+  return el('details', { class: 'more' }, el('summary', { textContent: 'More settings' }), el('div', { class: 'more-body' }, ...children));
 }
 
-/** Click-or-drop area for files. */
-export function dropZone(text: string, accept: string, multiple: boolean, onFiles: (files: File[]) => void) {
+/** A hidden file input; open() shows the system file dialog. */
+export function filePicker(accept: string, multiple: boolean, onFiles: (files: File[]) => void) {
   const input = el('input', { type: 'file', accept, multiple, hidden: true });
-  const label = el('span', { textContent: text });
-  const zone = el('button', { class: 'drop', onclick: () => input.click() }, label, input);
-  const take = (list: FileList | null | undefined) => {
-    const files = [...(list ?? [])].filter((f) => accept.split(',').some((a) => matches(f, a.trim())));
+  input.onchange = () => {
+    const files = matching(input.files, accept);
+    input.value = '';
     if (files.length) onFiles(multiple ? files : files.slice(0, 1));
   };
-  input.onchange = () => {
-    take(input.files);
-    input.value = '';
-  };
-  zone.ondragover = (e) => {
-    e.preventDefault();
-    zone.classList.add('over');
-  };
-  zone.ondragleave = () => zone.classList.remove('over');
-  zone.ondrop = (e) => {
-    e.preventDefault();
-    zone.classList.remove('over');
-    take(e.dataTransfer?.files);
-  };
-  return { el: zone, label };
+  document.body.append(input);
+  return { open: () => input.click() };
 }
 
-function matches(f: File, accept: string) {
-  if (accept.endsWith('/*')) return f.type.startsWith(accept.slice(0, -1));
-  return f.type === accept || f.name.toLowerCase().endsWith(accept.toLowerCase());
+/** Makes a whole area accept dropped files. */
+export function dropTarget(area: HTMLElement, accept: string, multiple: boolean, onFiles: (files: File[]) => void) {
+  // dragenter/leave fire for every child, so count them
+  let depth = 0;
+  area.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    if (++depth === 1) area.classList.add('over');
+  });
+  area.addEventListener('dragover', (e) => e.preventDefault());
+  area.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) area.classList.remove('over');
+  });
+  area.addEventListener('drop', (e) => {
+    e.preventDefault();
+    depth = 0;
+    area.classList.remove('over');
+    const files = matching(e.dataTransfer?.files, accept);
+    if (files.length) onFiles(multiple ? files : files.slice(0, 1));
+  });
+}
+
+function matching(list: FileList | null | undefined, accept: string) {
+  const rules = accept.split(',').map((a) => a.trim().toLowerCase());
+  return [...(list ?? [])].filter((f) =>
+    rules.some((a) => (a.endsWith('/*') ? f.type.startsWith(a.slice(0, -1)) : f.type === a || f.name.toLowerCase().endsWith(a))),
+  );
+}
+
+/** Hands a finished file to the browser's download. */
+export function saveFile(url: string, name: string) {
+  const a = el('a', { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
 }
 
 export const mb = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`;
