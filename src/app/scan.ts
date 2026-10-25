@@ -4,7 +4,7 @@
 
 import { cutSound, exportGif, exportMp4, exportPngZip, type DrawFrame } from './export.ts';
 import { frameSize, missingPages, processScan, toEntries, type Project, type ScanEntry } from './scans.ts';
-import { printed } from './session.ts';
+import { printed, type SoundPiece } from './session.ts';
 import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, slider, toggleRow, type Control } from './ui.ts';
 
 const SIZES = { small: 640, medium: 960, large: 1280 } as const;
@@ -22,8 +22,8 @@ export function scanPanel() {
     boomerang: false,
     repeat: 1,
     sound: true,
-    soundFile: null as File | null,
-    soundStart: 0,
+    /** the original sound, in printed order; from this session or picked by hand */
+    soundPieces: null as SoundPiece[] | null,
     format: 'mp4' as Format,
     size: 'large' as Size,
     trim: 0,
@@ -48,8 +48,9 @@ export function scanPanel() {
     return opts.boomerang && base.length > 2 ? [...base, ...base.slice(1, -1).reverse()] : base;
   };
   const soundAllowed = (p: Project) => fps(p) === p.payload.fps && !opts.boomerang;
-  const withSound = (p: Project) => opts.format === 'mp4' && opts.sound && !!opts.soundFile && soundAllowed(p);
-  const exportKey = (p: Project) => JSON.stringify([p.id, p.frames.size, opts, opts.soundFile?.name, withSound(p)]);
+  const withSound = (p: Project) => opts.format === 'mp4' && opts.sound && !!opts.soundPieces && soundAllowed(p);
+  const soundNames = () => [...new Set((opts.soundPieces ?? []).map((s) => s.file.name))];
+  const exportKey = (p: Project) => JSON.stringify([p.id, p.frames.size, opts, soundNames(), withSound(p)]);
 
   // --- before anything is in ---
   const picker = filePicker(ACCEPT, true, (f) => void add(f));
@@ -81,12 +82,9 @@ export function scanPanel() {
   /** When a project shows up: use what this session knows about it. */
   function onProject() {
     const p = current();
-    if (!p || opts.soundFile) return;
+    if (!p || opts.soundPieces) return;
     const known = printed.get(p.id);
-    if (known) {
-      opts.soundFile = known.video.file;
-      opts.soundStart = known.start;
-    }
+    if (known) opts.soundPieces = known.pieces;
   }
 
   // --- view: player + frame strip ---
@@ -141,8 +139,7 @@ export function scanPanel() {
   const soundToggle = toggleRow('Sound', () => opts.sound, (v) => ((opts.sound = v), changed()));
   const soundPicker = filePicker('video/*', false, (f) => {
     const p = current();
-    opts.soundFile = f[0];
-    opts.soundStart = (p && (printed.get(p.id)?.start ?? p.payload.start)) ?? 0;
+    opts.soundPieces = [{ file: f[0], start: p?.payload.start ?? 0, length: Infinity }];
     opts.sound = true;
     changed();
   });
@@ -273,10 +270,13 @@ export function scanPanel() {
 
       // sound
       const allowed = soundAllowed(p);
-      const has = !!opts.soundFile;
+      const has = !!opts.soundPieces;
+      const names = soundNames();
       soundToggle.el.hidden = !has || !allowed;
       soundButton.hidden = !allowed;
-      soundButton.textContent = has ? `${opts.soundFile!.name} · change` : 'Add the original video for its sound';
+      soundButton.textContent = has
+        ? `${names.length > 1 ? `${names.length} videos` : names[0]} · change`
+        : 'Add the original video for its sound';
       soundNote.textContent = !allowed
         ? `Sound only fits at ${p.payload.fps} frames per second and without boomerang.`
         : has && opts.format !== 'mp4'
@@ -371,7 +371,7 @@ export function scanPanel() {
       let audio: AudioBuffer | undefined;
       if (withSound(p)) {
         download.textContent = 'Reading the sound…';
-        audio = await cutSound(opts.soundFile!, opts.soundStart, p.payload.frameCount / p.payload.fps, repeat);
+        audio = await cutSound(opts.soundPieces!, p.payload.frameCount / p.payload.fps, repeat);
       }
       const job = {
         frames: order.length * repeat,

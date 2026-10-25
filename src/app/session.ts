@@ -1,12 +1,17 @@
 // What was printed in this browser session, so the Scan side can find the
-// original video (for its sound) without asking for it again.
+// original videos (for their sound) without asking for them again.
 
-import type { LoadedVideo } from './video.ts';
+/** A piece of a video's sound, in the order it was cut together. */
+export interface SoundPiece {
+  file: File;
+  /** where the piece starts in the video, s */
+  start: number;
+  /** s; Infinity = as long as needed */
+  length: number;
+}
 
 export interface PrintedProject {
-  video: LoadedVideo;
-  /** where the printed part starts in the video, s */
-  start: number;
+  pieces: SoundPiece[];
 }
 
 export const printed = new Map<string, PrintedProject>();

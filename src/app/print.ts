@@ -1,6 +1,7 @@
-// Print: video → printable sheets, all on one screen. Drop a video, pick the
-// part, download the PDF. The view on the left shows the moving video (with
-// the crop) or the sheets, and follows whatever was changed last.
+// Print: videos → printable sheets, all on one screen. Drop videos, cut them
+// together on the timeline, download the PDF. The view shows the edit at the
+// print frame rate (with the crop) or the sheets, and follows whatever was
+// changed last.
 
 import {
   BORDERS,
@@ -22,9 +23,10 @@ import { buildSheetsPdf, pageCount } from '../core/pdf.ts';
 import type { SheetStyle } from '../core/sheet.ts';
 import { renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
+import { clipLength, frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, type Clip } from './sequence.ts';
 import { timeline } from './timeline.ts';
 import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, toggleRow, type Control } from './ui.ts';
-import { frameGrabber, loadVideo, type Crop, type LoadedVideo } from './video.ts';
+import { loadVideo } from './video.ts';
 import { videoView } from './videoview.ts';
 
 const FPS_CHOICES = [6, 8, 12, 15, 24];
@@ -47,17 +49,10 @@ function spread<T>(list: T[], max: number): T[] {
   return [...new Set([...Array(max).keys()].map((i) => Math.round((i * (list.length - 1)) / (max - 1))))].map((i) => list[i]);
 }
 
-const fmtTime = (t: number) => `${t.toFixed(1)} s`;
-
 export function printPanel() {
   const state = {
-    video: null as LoadedVideo | null,
-    start: 0,
-    end: 0,
     fps: 12,
     crop: 'original',
-    cropX: 0.5,
-    cropY: 0.5,
     paper: 'A4' as PaperId,
     landscape: true,
     capture: 'scanner' as Capture,
@@ -71,14 +66,18 @@ export function printPanel() {
   };
   /** The last PDF; downloading again without changes gives the same file (and project). */
   let last: { key: string; url: string; name: string } | null = null;
+  /** The edit, with undo. While a clip edge is dragged, `draft` shows the edit in progress. */
+  const edit = history();
+  let draft: Clip[] | null = null;
+  const clips = () => draft ?? edit.get();
 
   // --- derived ---
   const aspect = () => {
     const c = CROPS.find((x) => x.value === state.crop);
     if (c) return c.ratio;
-    return state.video ? state.video.width / state.video.height : 16 / 9;
+    const first = clips()[0];
+    return first ? first.video.width / first.video.height : 16 / 9;
   };
-  const crop = (): Crop => ({ aspect: aspect(), x: state.cropX, y: state.cropY });
   const version = () => (state.capture === 'photo' ? PHOTO_LAYOUT : LAYOUT_VERSION);
   const gap = () => gapForBorder(BORDERS[state.border], version());
   const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, aspect(), gap(), 20, version()), MAX_GRID_OPTIONS);
@@ -87,11 +86,17 @@ export function printPanel() {
     return list.reduce((best, c) => (Math.abs(c.count - state.count) < Math.abs(best.count - state.count) ? c : best), list[0]);
   };
   const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, aspect(), gap(), choice(), version());
-  const frameCount = () => (state.video ? Math.max(1, Math.floor((state.end - state.start) * state.fps + 1e-6)) : 1);
-  const pdfKey = () => JSON.stringify([state.video?.url, state.start, state.end, state.fps, crop(), spec(), state.style]);
+  const frameCount = () => Math.max(1, countFrames(clips(), state.fps));
+  const pdfKey = () =>
+    JSON.stringify([clips().map((c) => [c.video.url, c.from, c.to, c.cropX, c.cropY]), state.fps, aspect(), spec(), state.style]);
+  const videoNames = () => [...new Set(clips().map((c) => c.video.file.name))];
+  const title = () => {
+    const names = videoNames();
+    return names.length > 1 ? `${names[0]} + ${names.length - 1} more` : names[0];
+  };
 
   // --- before a video is in ---
-  const picker = filePicker('video/*', false, (f) => void open(f[0]));
+  const picker = filePicker('video/*', true, (f) => void addVideos(f));
   const intakeNote = el('p', { class: 'hint' });
   const intake = el(
     'div',
@@ -102,31 +107,53 @@ export function printPanel() {
   );
 
   // --- view: video or sheets ---
-  const view = videoView(
-    (c) => {
-      state.cropX = c.x;
-      state.cropY = c.y;
-      changed('video');
+  const view = videoView({
+    clips,
+    fps: () => state.fps,
+    aspect,
+    onCrop(id, x, y, done) {
+      const next = setCrop(edit.get(), id, x, y);
+      draft = done ? null : next;
+      if (done) edit.push(next);
+      if (done) changed('video');
     },
-    (t) => tl.setPlayhead(t),
-  );
-  const tl = timeline(
-    () => ({ start: state.start, end: state.end }),
-    (r) => {
-      state.start = r.start;
-      state.end = r.end;
-      changed('video');
+    onTime: () => tl.tick(),
+  });
+  const tl = timeline({
+    clips,
+    fps: () => state.fps,
+    commit(next) {
+      draft = null;
+      edit.push(next);
+      edited();
     },
-    () => 2 / state.fps,
-  );
-  const rangeLabel = el('span');
-  const videoPane = el(
-    'div',
-    { class: 'video-pane' },
-    view.el,
-    tl.el,
-    el('div', { class: 'tl-label' }, rangeLabel, el('span', { class: 'muted', textContent: 'Drag the edges to pick the part you want' })),
-  );
+    preview(next) {
+      draft = next;
+      edited();
+    },
+    undo: () => edit.undo() && edited(),
+    redo: () => edit.redo() && edited(),
+    canUndo: edit.canUndo,
+    canRedo: edit.canRedo,
+    time: () => view.time(),
+    seek(t) {
+      view.seek(t);
+      tl.sync();
+    },
+    playing: () => view.playing(),
+    togglePlay() {
+      view.toggle();
+      tl.sync();
+    },
+    pickVideos: () => picker.open(),
+    dropVideos: (files, at) => void addVideos(files, at),
+  });
+  const videoPane = el('div', { class: 'video-pane' }, view.el, tl.el);
+
+  function edited() {
+    view.refresh();
+    changed('video');
+  }
 
   const sheet = el('div', { class: 'sheet' });
   const pageLabel = el('span');
@@ -165,7 +192,8 @@ export function printPanel() {
     () => state.crop,
     (v) => {
       state.crop = v;
-      state.cropX = state.cropY = 0.5;
+      edit.replace(edit.get().map((c) => ({ ...c, cropX: 0.5, cropY: 0.5 })));
+      view.refresh();
       changed('video');
     },
   );
@@ -214,7 +242,7 @@ export function printPanel() {
 
   const controls = sidebar(
     [
-      el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Change', onclick: picker.open })),
+      el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Add video', onclick: picker.open })),
       fileNote,
       group('Video', field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.')), field('Crop', cropCtl.el, cropHint)),
       group(
@@ -240,33 +268,63 @@ export function printPanel() {
     el('div', { class: 'view' }, el('div', { class: 'view-head' }, viewCtl.el), videoPane, sheetPane),
   );
 
-  async function open(file: File) {
-    const note = state.video ? fileNote : intakeNote;
+  /** New videos go to the end of the edit, or where they were dropped on the timeline. */
+  async function addVideos(files: File[], at?: number) {
+    const first = !edit.get().length;
+    const note = first ? intakeNote : fileNote;
     note.className = 'hint';
-    note.textContent = 'Opening…';
-    try {
-      const v = await loadVideo(file);
-      if (state.video) URL.revokeObjectURL(state.video.url);
-      state.video = v;
-      state.start = 0;
-      state.end = v.duration;
+    note.textContent = files.length > 1 ? `Opening ${files.length} videos…` : 'Opening…';
+    const added: Clip[] = [];
+    const errors: string[] = [];
+    for (const f of files) {
+      try {
+        added.push(newClip(await loadVideo(f)));
+      } catch (e) {
+        errors.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    note.className = errors.length ? 'warn' : 'hint';
+    note.textContent = errors.join(' ');
+    if (!added.length) return;
+    const next = insert(edit.get(), at ?? edit.get().length, added);
+    if (first) {
+      edit.reset(next);
       state.crop = 'original';
-      state.cropX = state.cropY = 0.5;
-      state.landscape = v.width >= v.height;
+      state.landscape = added[0].video.width >= added[0].video.height;
       state.page = 1;
       thumbs.clear();
-      note.textContent = '';
-      fileName.textContent = file.name;
-      intake.hidden = true;
-      work.hidden = false;
-      show('video');
-      tl.load(v);
-      changed();
-    } catch (e) {
-      note.className = 'warn';
-      note.textContent = e instanceof Error ? e.message : String(e);
-    }
+      view.seek(0);
+    } else edit.push(next);
+    intake.hidden = true;
+    work.hidden = false;
+    show('video');
+    tl.fit();
+    edited();
   }
+
+  // --- keyboard, like in an editor ---
+  document.addEventListener('keydown', (e) => {
+    if (page.hidden || work.hidden || state.busy) return;
+    if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const k = e.key.toLowerCase();
+    const step = (d: number) => view.seek(Math.max(0, view.time() + d));
+    if (k === ' ') view.toggle();
+    else if ((k === 's' && !mod) || (mod && (k === 'b' || k === 'k'))) tl.split();
+    else if (k === 'backspace' || k === 'delete') tl.deleteSelected();
+    else if (mod && k === 'z') (e.shiftKey ? edit.redo() : edit.undo()) && edited();
+    else if (mod && k === 'y') edit.redo() && edited();
+    else if (k === 'arrowleft') step(-(e.shiftKey ? 1 : 1 / state.fps));
+    else if (k === 'arrowright') step(e.shiftKey ? 1 : 1 / state.fps);
+    else if (k === 'home') view.seek(0);
+    else if (k === 'end') view.seek(Math.max(0, frameCount() - 1) / state.fps);
+    else if (k === '+' || k === '=') tl.zoomBy(1.6);
+    else if (k === '-') tl.zoomBy(1 / 1.6);
+    else return;
+    e.preventDefault();
+    if (state.view !== 'video') show('video');
+    tl.sync();
+  });
 
   // --- sheet preview ---
   function turn(d: number) {
@@ -275,7 +333,10 @@ export function printPanel() {
   }
 
   const thumbs = new Map<string, string>();
-  const thumbKey = (i: number) => `${state.start}|${state.fps}|${aspect().toFixed(4)}|${state.cropX}|${state.cropY}|${i}`;
+  const thumbKey = (i: number) => {
+    const { clip, source } = frameAt(clips(), state.fps, i);
+    return `${clip.video.url}|${source.toFixed(3)}|${aspect().toFixed(4)}|${clip.cropX}|${clip.cropY}`;
+  };
   let previewRun = 0;
 
   async function renderPreview() {
@@ -295,22 +356,21 @@ export function printPanel() {
         layout,
         { version: s.version ?? LAYOUT_VERSION, projectId: state.projectId, page: state.page, pages, spec: s, fps: state.fps, frameCount: n },
         state.style,
-        state.video?.file.name,
+        title(),
         (i) => thumbs.get(thumbKey(i)),
       );
       if (run === previewRun) sheet.replaceChildren(svg);
     };
     await draw();
 
-    const v = state.video;
-    if (!v) return;
+    if (!clips().length) return;
     const first = (state.page - 1) * framesPerPage(s);
     const wanted = [...Array(Math.min(framesPerPage(s), n - first, 60)).keys()].map((k) => first + k);
     const missing = wanted.filter((i) => !thumbs.has(thumbKey(i)));
     if (!missing.length) return;
     await new Promise((r) => setTimeout(r, 200)); // settle while things move
     if (run !== previewRun) return;
-    const grab = await frameGrabber(v, state.start, state.fps, crop(), 240);
+    const grab = await sequenceGrabber(clips(), state.fps, aspect(), 240);
     for (const i of missing) {
       if (run !== previewRun) return;
       thumbs.set(thumbKey(i), await grab.dataUrl(i));
@@ -321,8 +381,7 @@ export function printPanel() {
   // --- updates ---
   /** `from` says which part was touched, so the view can follow. */
   function changed(from?: View) {
-    const v = state.video;
-    if (!v) return;
+    if (work.hidden) return;
     if (from) show(from);
     const s = spec();
     const n = frameCount();
@@ -338,10 +397,11 @@ export function printPanel() {
     frameSizeNote.textContent = `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;
 
     tl.sync();
-    rangeLabel.textContent = `${fmtTime(state.start)} – ${fmtTime(state.end)} · ${plural(n, 'frame', 'frames')}`;
-    view.set({ video: v, start: state.start, end: state.end, fps: state.fps, crop: crop() });
+    const names = videoNames();
+    fileName.textContent = names.length > 1 ? `${names.length} videos` : (names[0] ?? 'No video');
+    fileName.title = names.join(', ');
 
-    const err = validateSpec(s);
+    const err = clips().length ? validateSpec(s) : 'Add a video to make sheets.';
     download.disabled = !!err || state.busy;
     summary.className = err ? 'warn' : 'hint';
     summary.textContent =
@@ -351,9 +411,9 @@ export function printPanel() {
   }
 
   async function createPdf() {
-    const v = state.video;
+    const list = edit.get();
     const s = spec();
-    if (!v || validateSpec(s) || state.busy) return;
+    if (!list.length || validateSpec(s) || state.busy) return;
     const key = pdfKey();
     if (last?.key === key) return saveFile(last.url, last.name);
     // a new PDF is a new project, so sheets of two runs can't get mixed up
@@ -367,15 +427,16 @@ export function printPanel() {
     const n = frameCount();
     const id = state.projectId;
     try {
-      const grab = await frameGrabber(v, state.start, state.fps, crop(), (s.frameW / 25.4) * 300); // ~300 dpi
+      const grab = await sequenceGrabber(list, state.fps, aspect(), (s.frameW / 25.4) * 300); // ~300 dpi
       const bytes = await buildSheetsPdf({
         spec: s,
         style: state.style,
         projectId: id,
         fps: state.fps,
         frameCount: n,
-        title: v.file.name,
-        start: state.start,
+        title: title(),
+        // the QR code can only say where one uncut piece starts in its video
+        start: list.length === 1 ? list[0].from : undefined,
         getFrame: (i) => grab.jpeg(i),
         onProgress: (done, total) => (download.textContent = `Preparing frame ${done} of ${total}`),
       });
@@ -383,7 +444,7 @@ export function printPanel() {
       last = { key, url: URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/pdf' })), name: `papr-${id}.pdf` };
       saveFile(last.url, last.name);
       pdfNote.textContent = `${last.name} · ${mb(bytes.length)}. Print at 100 % or fit to page.`;
-      printed.set(id, { video: v, start: state.start });
+      printed.set(id, { pieces: list.map((c) => ({ file: c.video.file, start: c.from, length: clipLength(c) })) });
     } catch (e) {
       pdfNote.className = 'warn';
       pdfNote.textContent = e instanceof Error ? e.message : String(e);
@@ -395,6 +456,6 @@ export function printPanel() {
   }
 
   const page = el('section', { class: 'page' }, intake, work);
-  dropTarget(page, 'video/*', false, (f) => void open(f[0]));
-  return { el: page, open, state };
+  dropTarget(page, 'video/*', true, (f) => void addVideos(f));
+  return { el: page, open: (f: File) => addVideos([f]), addVideos, state, clips };
 }

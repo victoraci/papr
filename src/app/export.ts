@@ -13,6 +13,7 @@ import {
   Output,
   QUALITY_HIGH,
 } from 'mediabunny';
+import type { SoundPiece } from './session.ts';
 
 /** Draws output frame i into the canvas at w × h. */
 export type DrawFrame = (ctx: OffscreenCanvasRenderingContext2D, i: number, w: number, h: number) => void;
@@ -100,23 +101,34 @@ export async function exportPngZip(job: ExportJob, name: string): Promise<Blob> 
   return new Blob([zipSync(files) as BlobPart], { type: 'application/zip' });
 }
 
-/** The original sound for the printed part, repeated `times`. */
-export async function cutSound(file: File, start: number, duration: number, times: number): Promise<AudioBuffer> {
-  const ctx = new OfflineAudioContext(2, 1, 48000);
-  let full: AudioBuffer;
-  try {
-    full = await ctx.decodeAudioData(await file.arrayBuffer());
-  } catch {
-    throw new Error('This video has no sound this browser can read.');
-  }
-  const rate = full.sampleRate;
-  const from = Math.min(full.length, Math.round(start * rate));
+/**
+ * The original sound of the printed edit: the pieces one after another, cut
+ * to `duration` and repeated `times`. Videos without readable sound stay
+ * silent for their part.
+ */
+export async function cutSound(pieces: SoundPiece[], duration: number, times: number): Promise<AudioBuffer> {
+  const rate = 48000;
+  // decoding resamples to the context's rate, so pieces of different videos fit together
+  const ctx = new OfflineAudioContext(2, 1, rate);
+  const decoded = new Map<File, AudioBuffer | null>();
+  for (const p of pieces)
+    if (!decoded.has(p.file)) decoded.set(p.file, await ctx.decodeAudioData(await p.file.arrayBuffer()).catch(() => null));
+  if (![...decoded.values()].some(Boolean)) throw new Error('These videos have no sound this browser can read.');
+
   const len = Math.max(1, Math.round(duration * rate));
-  const out = new AudioBuffer({ length: len * times, numberOfChannels: full.numberOfChannels, sampleRate: rate });
-  for (let c = 0; c < full.numberOfChannels; c++) {
-    const piece = full.getChannelData(c).subarray(from, from + len);
-    const dst = out.getChannelData(c);
-    for (let t = 0; t < times; t++) dst.set(piece, t * len);
+  const once = [new Float32Array(len), new Float32Array(len)];
+  let at = 0;
+  for (const p of pieces) {
+    if (at >= len) break;
+    const n = Math.min(len - at, Number.isFinite(p.length) ? Math.round(p.length * rate) : len);
+    const full = decoded.get(p.file);
+    if (full) {
+      const from = Math.min(full.length, Math.round(p.start * rate));
+      for (let c = 0; c < 2; c++) once[c].set(full.getChannelData(Math.min(c, full.numberOfChannels - 1)).subarray(from, from + n), at);
+    }
+    at += n;
   }
+  const out = new AudioBuffer({ length: len * times, numberOfChannels: 2, sampleRate: rate });
+  for (let c = 0; c < 2; c++) for (let t = 0; t < times; t++) out.getChannelData(c).set(once[c], t * len);
   return out;
 }
