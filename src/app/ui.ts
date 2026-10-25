@@ -63,6 +63,16 @@ export function options<T extends string | number>(
   };
 }
 
+/** Numbered steps; any of them can be opened, there is no forced order. */
+export function steps<T extends string>(list: Option<T>[], get: () => T, set: (v: T) => void): Control {
+  const buttons = list.map((o, i) =>
+    el('button', { class: 'step', onclick: () => set(o.value) }, el('span', { class: 'step-n', textContent: String(i + 1) }), o.label),
+  );
+  const sync = () => buttons.forEach((b, i) => (list[i].value === get() ? b.setAttribute('aria-current', 'step') : b.removeAttribute('aria-current')));
+  sync();
+  return { el: el('nav', { class: 'steps' }, ...buttons), sync };
+}
+
 /** A label over a control, with an optional quiet line below. */
 export function field(label: string, ...children: Child[]) {
   return el('div', { class: 'field' }, el('div', { class: 'field-label', textContent: label }), ...children);

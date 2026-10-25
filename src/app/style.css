@@ -324,6 +324,60 @@ button.link:hover {
   min-height: 32px;
 }
 
+/* --- steps: 1 Video, 2 Paper --- */
+
+.steps {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px 5px 7px;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.step:hover {
+  background: none;
+  color: var(--text);
+}
+
+.step-n {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step[aria-current='step'] {
+  background: var(--line);
+  color: var(--text);
+}
+
+.step[aria-current='step'] .step-n {
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+/* a step's settings take part in the column's layout as if unwrapped */
+.step-part {
+  display: contents;
+}
+
 /* --- settings column (left) --- */
 
 .side {

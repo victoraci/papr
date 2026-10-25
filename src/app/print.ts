@@ -1,7 +1,7 @@
-// Print: videos → printable sheets, all on one screen. Drop videos, cut them
-// together on the timeline, download the PDF. The view shows the edit at the
-// print frame rate (with the crop) or the sheets, and follows whatever was
-// changed last.
+// Print: videos → printable sheets, in two steps. 1 Video: drop videos, cut
+// them together on the timeline, pick the frame rate and crop. 2 Paper:
+// everything about the sheets, then download the PDF. Both steps can be
+// opened at any time.
 
 import {
   BORDERS,
@@ -25,7 +25,7 @@ import { renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
 import { clipLength, frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, type Clip } from './sequence.ts';
 import { timeline } from './timeline.ts';
-import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, toggleRow, type Control } from './ui.ts';
+import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, steps, toggleRow, type Control } from './ui.ts';
 import { loadVideo } from './video.ts';
 import { videoView } from './videoview.ts';
 
@@ -161,22 +161,30 @@ export function printPanel() {
   const nextPage = el('button', { class: 'link', textContent: 'Next', onclick: () => turn(1) });
   const sheetPane = el('div', { class: 'sheet-pane', hidden: true }, sheet, el('div', { class: 'pager' }, prev, pageLabel, nextPage));
 
-  const viewCtl = options<View>(
+  const stepCtl = steps<View>(
     [
       { value: 'video', label: 'Video' },
-      { value: 'sheets', label: 'Sheets' },
+      { value: 'sheets', label: 'Paper' },
     ],
     () => state.view,
     (v) => show(v),
   );
 
+  /** Opens a step: its settings on the side, its picture in the view. */
   function show(v: View) {
     if (v === state.view) return;
     state.view = v;
-    viewCtl.sync();
+    stepCtl.sync();
     videoPane.hidden = v !== 'video';
     sheetPane.hidden = v !== 'sheets';
-    if (v === 'sheets') void renderPreview();
+    for (const part of videoParts) part.hidden = v !== 'video';
+    for (const part of paperParts) part.hidden = v !== 'sheets';
+    if (v === 'video') view.refresh();
+    else {
+      view.pause();
+      void renderPreview();
+    }
+    tl.sync();
   }
 
   // --- controls ---
@@ -239,12 +247,21 @@ export function printPanel() {
   const download = el('button', { class: 'primary wide', textContent: 'Download PDF', onclick: () => void createPdf() });
   const summary = hint();
   const pdfNote = hint();
+  const next = el('button', { class: 'primary wide', textContent: 'Next: Paper', onclick: () => show('sheets') });
+  const videoSummary = hint();
 
-  const controls = sidebar(
-    [
+  // each step has its own settings and button; the other step's are hidden
+  const part = (...children: (HTMLElement | null)[]) => el('div', { class: 'step-part' }, ...children);
+  const videoParts = [
+    part(
       el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Add video', onclick: picker.open })),
       fileNote,
       group('Video', field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.')), field('Crop', cropCtl.el, cropHint)),
+    ),
+    part(next, videoSummary),
+  ];
+  const paperParts = [
+    part(
       group(
         'Paper',
         field('Size', paperCtl.el),
@@ -257,15 +274,17 @@ export function printPanel() {
         el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)),
         hint('The thin line helps photos line up when your video is white at the edges.'),
       ),
-    ],
-    [download, summary, pdfNote],
-  );
+    ),
+    part(download, summary, pdfNote),
+  ];
+  for (const p of paperParts) p.hidden = true;
+  const controls = sidebar([videoParts[0], paperParts[0]], [videoParts[1], paperParts[1]]);
 
   const work = el(
     'div',
     { class: 'work', hidden: true },
     controls,
-    el('div', { class: 'view' }, el('div', { class: 'view-head' }, viewCtl.el), videoPane, sheetPane),
+    el('div', { class: 'view' }, el('div', { class: 'view-head' }, stepCtl.el), videoPane, sheetPane),
   );
 
   /** New videos go to the end of the edit, or where they were dropped on the timeline. */
@@ -304,7 +323,8 @@ export function printPanel() {
 
   // --- keyboard, like in an editor ---
   document.addEventListener('keydown', (e) => {
-    if (page.hidden || work.hidden || state.busy) return;
+    // editing keys belong to the video step
+    if (page.hidden || work.hidden || state.busy || state.view !== 'video') return;
     if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) return;
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
@@ -322,7 +342,6 @@ export function printPanel() {
     else if (k === '-') tl.zoomBy(1 / 1.6);
     else return;
     e.preventDefault();
-    if (state.view !== 'video') show('video');
     tl.sync();
   });
 
@@ -403,6 +422,10 @@ export function printPanel() {
 
     const err = clips().length ? validateSpec(s) : 'Add a video to make sheets.';
     download.disabled = !!err || state.busy;
+    next.disabled = !clips().length;
+    videoSummary.textContent = clips().length
+      ? `${plural(n, 'frame', 'frames')} · ${(n / state.fps).toFixed(1)} s at ${state.fps} fps`
+      : 'Add a video to start.';
     summary.className = err ? 'warn' : 'hint';
     summary.textContent =
       err ?? `${plural(n, 'frame', 'frames')} on ${plural(pages, 'sheet', 'sheets')} · ${PAPERS[s.paper].name} ${s.landscape ? 'landscape' : 'portrait'}`;
