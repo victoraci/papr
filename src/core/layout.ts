@@ -348,30 +348,21 @@ export function copiesGap(border: number): number {
   return border > 0 ? 2 * border : 3;
 }
 
-/** "Copies per sheet" options, as for frames: for every grid the biggest copies that fit. */
-export function copiesChoices(paper: PaperId, landscape: boolean, aspect: number, gap: number, minSize = 15): GridChoice[] {
+/** Width of the biggest copy that fits once, mm. */
+export function copiesMaxWidth(paper: PaperId, landscape: boolean, aspect: number): number {
   const area = copiesArea(paper, landscape);
-  const best = new Map<number, GridChoice>();
-  for (let cols = 1; cols <= 12; cols++)
-    for (let rows = 1; rows <= 16; rows++) {
-      const w = Math.floor(Math.min((area.w - (cols - 1) * gap) / cols, ((area.h - (rows - 1) * gap) / rows) * aspect));
-      if (w < minSize || w / aspect < minSize) continue;
-      const count = cols * rows;
-      const prev = best.get(count);
-      if (!prev || w > prev.frameW) best.set(count, { cols, rows, count, frameW: w });
-    }
-  const sorted = [...best.values()].sort((a, b) => a.count - b.count);
-  return sorted.filter((c, i) => !sorted.slice(i + 1).some((d) => d.frameW >= c.frameW));
+  return Math.min(area.w, area.h * aspect);
 }
 
-/** Where the copies go: the grid in the middle of the page. */
-export function copiesCells(paper: PaperId, landscape: boolean, aspect: number, gap: number, g: GridChoice): Rect[] {
+/** Copies `w` mm wide: as many as fit, in a grid in the middle of the page. */
+export function copiesCells(paper: PaperId, landscape: boolean, aspect: number, gap: number, w: number): Rect[] {
   const area = copiesArea(paper, landscape);
-  const w = g.frameW;
   const h = w / aspect;
-  const x0 = area.x + (area.w - (g.cols * w + (g.cols - 1) * gap)) / 2;
-  const y0 = area.y + (area.h - (g.rows * h + (g.rows - 1) * gap)) / 2;
+  const cols = Math.max(0, Math.floor((area.w + gap + 1e-6) / (w + gap)));
+  const rows = Math.max(0, Math.floor((area.h + gap + 1e-6) / (h + gap)));
+  const x0 = area.x + (area.w - (cols * w + (cols - 1) * gap)) / 2;
+  const y0 = area.y + (area.h - (rows * h + (rows - 1) * gap)) / 2;
   const cells: Rect[] = [];
-  for (let r = 0; r < g.rows; r++) for (let c = 0; c < g.cols; c++) cells.push({ x: x0 + c * (w + gap), y: y0 + r * (h + gap), w, h });
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) cells.push({ x: x0 + c * (w + gap), y: y0 + r * (h + gap), w, h });
   return cells;
 }

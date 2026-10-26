@@ -10,8 +10,8 @@ import {
   BORDERS,
   computeLayout,
   copiesCells,
-  copiesChoices,
   copiesGap,
+  copiesMaxWidth,
   gapForBorder,
   gridChoices,
   LAYOUT_VERSION,
@@ -33,7 +33,7 @@ import { renderCopiesSvg, renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
 import { frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, soundPieces, type Clip, type Edit } from './sequence.ts';
 import { tc, timeline } from './timeline.ts';
-import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, steps, toggleRow, type Control } from './ui.ts';
+import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, slider, steps, toggleRow, type Control } from './ui.ts';
 import { loadVideo } from './video.ts';
 import { videoView } from './videoview.ts';
 
@@ -73,8 +73,9 @@ export function printPanel() {
     capture: 'scanner' as Capture,
     count: 9,
     make: 'animation' as Make,
-    copies: 8,
     border: 'none' as BorderId,
+    /** copies have their own sheet, so the frames they start from stay as printed; null = as for the frames */
+    copy: { paper: null as PaperId | null, landscape: null as boolean | null, border: 'none' as BorderId, width: null as number | null },
     style: { borders: false, frameNumbers: true, fileName: true } as SheetStyle,
     projectId: newProjectId(),
     view: 'video' as View,
@@ -94,23 +95,41 @@ export function printPanel() {
   const usesPicture = () => copies() && !!picture;
 
   // --- derived ---
-  const aspect = () => {
+  /** the frames of the animation */
+  const videoAspect = () => {
     const c = CROPS.find((x) => x.value === state.crop);
     if (c) return c.ratio;
+    const first = clips()[0];
+    if (first) return first.video.width / first.video.height;
+    return picture ? picture.width / picture.height : 16 / 9;
+  };
+  /** what's shown and printed now: the frames, or the copy */
+  const aspect = () => {
+    if (!copies() || CROPS.some((x) => x.value === state.crop)) return videoAspect();
     if (usesPicture()) return picture!.width / picture!.height;
-    const first = (copies() ? view.current() : null) ?? clips()[0];
-    return first ? first.video.width / first.video.height : 16 / 9;
+    const clip = view.current();
+    return clip ? clip.video.width / clip.video.height : videoAspect();
   };
   const version = () => (state.capture === 'photo' ? PHOTO_LAYOUT : LAYOUT_VERSION);
   const gap = () => gapForBorder(BORDERS[state.border], version());
-  const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, aspect(), gap(), 20, version()), MAX_GRID_OPTIONS);
+  const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, videoAspect(), gap(), 20, version()), MAX_GRID_OPTIONS);
   const choice = (): GridChoice => nearest(choices(), state.count)!;
-  const copyGap = () => copiesGap(BORDERS[state.border]);
-  const copyChoices = (): GridChoice[] => spread(copiesChoices(state.paper, state.landscape, aspect(), copyGap()), MAX_GRID_OPTIONS);
-  const copyChoice = () => nearest(copyChoices(), state.copies);
+  const copyPaper = () => state.copy.paper ?? state.paper;
+  const copyLandscape = () => state.copy.landscape ?? state.landscape;
+  const copyGap = () => copiesGap(BORDERS[state.copy.border]);
+  /** a copy the size of the frames on the animation sheets (fitted inside one if its shape differs) */
+  const sameAsFrames = () => {
+    const s = spec();
+    return Math.min(s.frameW, (s.frameW / s.aspect) * aspect());
+  };
+  const copyMax = () => copiesMaxWidth(copyPaper(), copyLandscape(), aspect());
+  const copyMin = () => Math.min(sameAsFrames(), copyMax());
+  /** width of each copy, mm: the frames' size unless made bigger */
+  const copyW = () => Math.min(copyMax(), Math.max(copyMin(), state.copy.width ?? sameAsFrames()));
+  const copyCells = () => copiesCells(copyPaper(), copyLandscape(), aspect(), copyGap(), copyW());
   /** the frame under the playhead */
   const copyFrame = () => Math.min(frameCount() - 1, Math.round(view.time() * state.fps));
-  const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, aspect(), gap(), choice(), version());
+  const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, videoAspect(), gap(), choice(), version());
   const frameCount = () => Math.max(1, countFrames(clips(), state.fps));
   const pdfKey = () =>
     JSON.stringify([clips().map((c) => [c.video.url, c.from, c.to, c.cropX, c.cropY]), state.fps, aspect(), spec(), state.style]);
@@ -288,16 +307,16 @@ export function printPanel() {
   const cropHint = hint('Drag the picture to choose what stays in the frame.');
   const paperCtl = options(
     (['A4', 'A3', 'A5', 'LT'] as PaperId[]).map((id) => ({ value: id, label: PAPERS[id].name })),
-    () => state.paper,
-    (v) => ((state.paper = v), changed('sheets')),
+    () => (copies() ? copyPaper() : state.paper),
+    (v) => (copies() ? (state.copy.paper = v) : (state.paper = v), changed('sheets')),
   );
   const orientCtl = options(
     [
       { value: 'P', label: 'Portrait' },
       { value: 'L', label: 'Landscape' },
     ],
-    () => (state.landscape ? 'L' : 'P'),
-    (v) => ((state.landscape = v === 'L'), changed('sheets')),
+    () => ((copies() ? copyLandscape() : state.landscape) ? 'L' : 'P'),
+    (v) => (copies() ? (state.copy.landscape = v === 'L') : (state.landscape = v === 'L'), changed('sheets')),
   );
   const captureCtl = options<Capture>(
     [
@@ -308,11 +327,26 @@ export function printPanel() {
     (v) => ((state.capture = v), changed('sheets')),
   );
   const captureHint = hint();
-  const gridCtl = options(
-    [],
-    () => (copies() ? (copyChoice()?.count ?? 0) : choice().count),
-    (v) => (copies() ? (state.copies = v) : (state.count = v), changed('sheets')),
+  const gridCtl = options([], () => choice().count, (v) => ((state.count = v), changed('sheets')));
+  const sizeCtl = slider(
+    'Size of each copy',
+    { min: () => Math.floor(copyMin()), max: () => Math.floor(copyMax()), step: 1 },
+    () => copyW(),
+    (v) => {
+      state.copy.width = v <= Math.floor(copyMin()) ? null : v;
+      changed('sheets');
+    },
+    () => `${Math.round(copyW())} × ${Math.round(copyW() / aspect())} mm`,
   );
+  const sizeNote = hint();
+  const sameSize = el('button', {
+    class: 'link',
+    textContent: 'Back to the size of the frames',
+    onclick: () => {
+      state.copy.width = null;
+      changed('sheets');
+    },
+  });
   const frameSizeNote = hint();
   const borderCtl = options<BorderId>(
     [
@@ -320,8 +354,8 @@ export function printPanel() {
       { value: 'small', label: 'Small' },
       { value: 'large', label: 'Large' },
     ],
-    () => state.border,
-    (v) => ((state.border = v), changed('sheets')),
+    () => (copies() ? state.copy.border : state.border),
+    (v) => (copies() ? (state.copy.border = v) : (state.border = v), changed('sheets')),
   );
   const toggles: Control[] = [
     toggleRow('Thin line around each frame', () => state.style.borders, (v) => ((state.style.borders = v), changed('sheets'))),
@@ -339,6 +373,7 @@ export function printPanel() {
   const videoGroup = group('Video', fpsField, field('Crop', cropCtl.el, cropHint));
   const scanField = field('Scan with', captureCtl.el, captureHint);
   const gridField = field('Frames per sheet', gridCtl.el, frameSizeNote);
+  const sizeField = el('div', { class: 'field' }, sizeCtl.el, sizeNote, sameSize);
   const borderHint = hint();
   const outlineHint = hint('The thin line helps photos line up when your video is white at the edges.');
   const videoParts = [
@@ -358,6 +393,7 @@ export function printPanel() {
         field('Orientation', orientCtl.el),
         scanField,
         gridField,
+        sizeField,
       ),
       more(field('White border', borderCtl.el, borderHint), el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)), outlineHint),
     ),
@@ -484,7 +520,7 @@ export function printPanel() {
       : clips().length
         ? thumbKey(copyFrame())
         : '';
-  const copyKey = () => JSON.stringify(['copies', copyImageKey(), state.paper, state.landscape, state.border, copyChoice(), state.style.borders]);
+  const copyKey = () => JSON.stringify(['copies', copyImageKey(), copyPaper(), copyLandscape(), copyGap(), copyW(), state.style.borders]);
 
   /** The copy at `width` px (at most its own size). */
   async function copyImage(width: number): Promise<FrameImage> {
@@ -495,10 +531,9 @@ export function printPanel() {
   }
 
   async function renderCopies(run: number) {
-    const g = copyChoice();
-    if (!g || !copyImageKey()) return void sheet.replaceChildren();
-    const { w, h } = pageSize(state.paper, state.landscape);
-    const cells = copiesCells(state.paper, state.landscape, aspect(), copyGap(), g);
+    if (!copyImageKey()) return void sheet.replaceChildren();
+    const { w, h } = pageSize(copyPaper(), copyLandscape());
+    const cells = copyCells();
     const key = copyImageKey();
     const draw = () => sheet.replaceChildren(renderCopiesSvg(w, h, cells, copyThumb?.key === key ? copyThumb.url : undefined, state.style.borders));
     draw();
@@ -560,31 +595,39 @@ export function printPanel() {
     const n = frameCount();
     const pages = pageCount(s, n);
 
-    for (const c of [makeCtl, fpsCtl, cropCtl, paperCtl, orientCtl, captureCtl, borderCtl, ...toggles]) c.sync();
+    for (const c of [makeCtl, fpsCtl, cropCtl, paperCtl, orientCtl, captureCtl, borderCtl, sizeCtl, ...toggles]) c.sync();
     syncMode();
     captureHint.textContent =
       state.capture === 'photo'
         ? 'Small squares between the frames keep photos of curved or painted paper in line.'
         : 'Only the four corners get printed. Photos work too, as long as the paper lies flat.';
     cropHint.hidden = state.crop === 'original';
-    gridCtl.setOptions((copies() ? copyChoices() : choices()).map((c) => ({ value: c.count, label: String(c.count) })));
-    const g = copyChoice();
-    frameSizeNote.textContent = copies()
-      ? g
-        ? `Each copy ${g.frameW} × ${Math.round(g.frameW / aspect())} mm`
-        : ''
-      : `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;
+    gridCtl.setOptions(choices().map((c) => ({ value: c.count, label: String(c.count) })));
+    frameSizeNote.textContent = `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;
+    const bigger = Math.round((copyW() / copyMin() - 1) * 100);
+    sizeNote.textContent =
+      sameAsFrames() > copyMax() + 1e-6
+        ? `The frames are ${Math.round(sameAsFrames())} mm wide, too big for this paper.`
+        : bigger > 0
+          ? `${bigger} % bigger than the frames on your animation sheets.`
+          : clips().length
+            ? 'The same size as the frames on your animation sheets.'
+            : 'The size frames get on animation sheets.';
+    sameSize.hidden = state.copy.width === null;
+    const cells = copyCells();
 
     tl.sync();
     const names = videoNames();
     fileName.textContent = names.length > 1 ? `${names.length} videos` : (names[0] ?? (picture ? 'No video yet' : 'No video'));
     fileName.title = names.join(', ');
 
-    const paperName = `${PAPERS[state.paper].name} ${state.landscape ? 'landscape' : 'portrait'}`;
+    const paperName = copies()
+      ? `${PAPERS[copyPaper()].name} ${copyLandscape() ? 'landscape' : 'portrait'}`
+      : `${PAPERS[state.paper].name} ${state.landscape ? 'landscape' : 'portrait'}`;
     const err = copies()
       ? !copyImageKey()
         ? 'Add a video or a picture first.'
-        : !g
+        : !cells.length
           ? 'This picture doesn’t fit on the sheet.'
           : null
       : clips().length
@@ -596,7 +639,7 @@ export function printPanel() {
     summary.className = err ? 'warn' : 'hint';
     summary.textContent =
       err ??
-      (copies() ? `${plural(g!.count, 'copy', 'copies')} on one sheet · ${paperName}` : `${plural(n, 'frame', 'frames')} on ${plural(pages, 'sheet', 'sheets')} · ${paperName}`);
+      (copies() ? `${plural(cells.length, 'copy', 'copies')} on one sheet · ${paperName}` : `${plural(n, 'frame', 'frames')} on ${plural(pages, 'sheet', 'sheets')} · ${paperName}`);
     if (last && last.key !== (copies() ? copyKey() : pdfKey())) pdfNote.textContent = '';
     if (state.view === 'sheets') void renderPreview();
   }
@@ -614,7 +657,8 @@ export function printPanel() {
     fpsField.hidden = c;
     videoGroup.querySelector('.group-title')!.textContent = usesPicture() ? 'Picture' : 'Video';
     scanField.hidden = c;
-    gridField.querySelector('.field-label')!.textContent = c ? 'Copies per sheet' : 'Frames per sheet';
+    gridField.hidden = c;
+    sizeField.hidden = !c;
     toggles[0].el.firstElementChild!.textContent = c ? 'Thin line around each copy' : 'Thin line around each frame';
     toggles[1].el.hidden = c;
     toggles[2].el.hidden = c;
@@ -644,8 +688,8 @@ export function printPanel() {
   }
 
   async function createCopiesPdf() {
-    const g = copyChoice();
-    if (!g || !copyImageKey() || state.busy) return;
+    const cells = copyCells();
+    if (!cells.length || !copyImageKey() || state.busy) return;
     const key = copyKey();
     if (last?.key === key) return saveFile(last.url, last.name);
     state.busy = true;
@@ -654,12 +698,12 @@ export function printPanel() {
     pdfNote.className = 'hint';
     try {
       const name = usesPicture() ? picture!.file.name : (view.current()?.video.file.name ?? 'video');
-      const { w, h } = pageSize(state.paper, state.landscape);
+      const { w, h } = pageSize(copyPaper(), copyLandscape());
       const bytes = await buildCopiesPdf({
         pageW: w,
         pageH: h,
-        cells: copiesCells(state.paper, state.landscape, aspect(), copyGap(), g),
-        image: await copyImage((g.frameW / 25.4) * 300), // ~300 dpi
+        cells,
+        image: await copyImage((copyW() / 25.4) * 300), // ~300 dpi
         outline: state.style.borders,
         title: name,
       });
