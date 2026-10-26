@@ -118,6 +118,7 @@ export function printPanel() {
       if (done) changed('video');
     },
     onTime: () => tl.tick(),
+    onPlay: () => tl.sync(),
   });
   const tl = timeline({
     clips,

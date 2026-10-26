@@ -2,6 +2,7 @@
 // moving and deleting only change this list; the video files stay as they
 // are. The printed frames are sampled from it at the print frame rate.
 
+import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input } from 'mediabunny';
 import type { FrameImage } from '../core/pdf.ts';
 import { cropRect, seek, videoElement, type LoadedVideo } from './video.ts';
 
@@ -198,50 +199,115 @@ export async function sequenceGrabber(clips: Clip[], fps: number, aspect: number
 
 /** Small frames along a video for the timeline film strip, filled in as they come. */
 export interface Thumbs {
-  /** times of the frames, s */
+  /** times of the frames, s, in order */
   times: number[];
   images: (ImageBitmap | undefined)[];
 }
 
 const thumbCache = new WeakMap<LoadedVideo, Thumbs>();
+const THUMB_H = 96;
+const MAX_THUMBS = 200;
+
+/** Coarse first, then the gaps, so a strip looks complete early. */
+function coarseToFine(n: number): number[] {
+  const order: number[] = [];
+  const seen = new Set<number>();
+  for (let step = 16; step >= 1; step /= 2)
+    for (let k = 0; k < n; k += step)
+      if (!seen.has(k)) {
+        seen.add(k);
+        order.push(k);
+      }
+  return order;
+}
 
 export function thumbsOf(video: LoadedVideo, onProgress: () => void): Thumbs {
   let t = thumbCache.get(video);
   if (t) return t;
-  const n = Math.max(6, Math.min(160, Math.round(video.duration * 4)));
-  t = { times: [...Array(n).keys()].map((k) => ((k + 0.5) / n) * video.duration), images: [] };
+  t = { times: [], images: [] };
   thumbCache.set(video, t);
   const thumbs = t;
   void (async () => {
-    const el = await videoElement(video.url);
-    const h = 96;
-    const w = Math.round((h * video.width) / video.height);
-    // coarse first, then fill the gaps, so the strip looks complete early
-    const order: number[] = [];
-    for (let step = 16; step >= 1; step /= 2) for (let k = 0; k < n; k += step) if (!order.includes(k)) order.push(k);
-    let last = performance.now();
-    for (const k of order) {
-      await seek(el, thumbs.times[k]);
-      thumbs.images[k] = await createImageBitmap(el, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' });
-      if (performance.now() - last > 120) {
-        last = performance.now();
-        onProgress();
-      }
-    }
+    const quick = await keyframeThumbs(video, thumbs, onProgress).catch(() => false);
+    if (!quick) await seekThumbs(video, thumbs, onProgress);
     onProgress();
   })();
   return thumbs;
 }
 
+/**
+ * Thumbs from the key frames only. Each of those decodes on its own, so this
+ * is quick even for long, heavy videos and leaves the decoder free for playing.
+ */
+async function keyframeThumbs(video: LoadedVideo, thumbs: Thumbs, onProgress: () => void): Promise<boolean> {
+  const input = new Input({ source: new BlobSource(video.file), formats: ALL_FORMATS });
+  const track = await input.getPrimaryVideoTrack();
+  if (!track || !(await track.canDecode())) return false;
+  const packets = new EncodedPacketSink(track);
+  let keys: number[] = [];
+  for (let p = await packets.getFirstPacket({ metadataOnly: true }); p; p = await packets.getNextKeyPacket(p, { metadataOnly: true }))
+    keys.push(p.timestamp);
+  if (!keys.length) return false;
+  if (keys.length > MAX_THUMBS) keys = [...Array(MAX_THUMBS).keys()].map((i) => keys[Math.floor((i * keys.length) / MAX_THUMBS)]);
+  const w = Math.round((THUMB_H * video.width) / video.height);
+  const sink = new CanvasSink(track, { width: w, height: THUMB_H, fit: 'fill' });
+  thumbs.times = keys;
+  let last = performance.now();
+  for (const k of coarseToFine(keys.length)) {
+    const frame = await sink.getCanvas(keys[k]);
+    if (frame) thumbs.images[k] = await createImageBitmap(frame.canvas);
+    if (performance.now() - last > 120) {
+      last = performance.now();
+      onProgress();
+    }
+  }
+  return true;
+}
+
+/** Thumbs by seeking a video element, for videos the decoder can't take on its own. */
+async function seekThumbs(video: LoadedVideo, thumbs: Thumbs, onProgress: () => void) {
+  const n = Math.max(6, Math.min(160, Math.round(video.duration * 4)));
+  thumbs.times = [...Array(n).keys()].map((k) => ((k + 0.5) / n) * video.duration);
+  thumbs.images = [];
+  const el = await videoElement(video.url);
+  const w = Math.round((THUMB_H * video.width) / video.height);
+  let last = performance.now();
+  for (const k of coarseToFine(n)) {
+    await seek(el, thumbs.times[k]);
+    thumbs.images[k] = await createImageBitmap(el, { resizeWidth: w, resizeHeight: THUMB_H, resizeQuality: 'medium' });
+    if (performance.now() - last > 120) {
+      last = performance.now();
+      onProgress();
+    }
+  }
+}
+
 /** The thumb closest to a time that is already there. */
 export function thumbAt(t: Thumbs, time: number): ImageBitmap | undefined {
-  const n = t.times.length;
-  const k = Math.max(0, Math.min(n - 1, Math.round((time / t.times[n - 1]) * (n - 0.5) - 0.5)));
-  for (let d = 0; d < n; d++) {
-    const a = t.images[k - d];
-    if (a) return a;
-    const b = t.images[k + d];
-    if (b) return b;
+  const { times, images } = t;
+  const n = times.length;
+  if (!n) return undefined;
+  // last thumb at or before the time
+  let lo = 0;
+  let hi = n - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (times[mid] <= time) lo = mid;
+    else hi = mid - 1;
+  }
+  // the nearest one that's there, looking both ways
+  let a = lo;
+  let b = lo + 1;
+  while (a >= 0 || b < n) {
+    const da = a >= 0 ? time - times[a] : Infinity;
+    const db = b < n ? times[b] - time : Infinity;
+    if (da <= db) {
+      if (images[a]) return images[a];
+      a--;
+    } else {
+      if (images[b]) return images[b];
+      b++;
+    }
   }
   return undefined;
 }
