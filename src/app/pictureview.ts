@@ -2,7 +2,7 @@
 // top, drag to move the crop.
 
 import type { FrameImage } from '../core/pdf.ts';
-import { applyTone } from './tone.ts';
+import { applyTone, type Tone } from './tone.ts';
 import { el } from './ui.ts';
 import { cropRect } from './video.ts';
 import { dragCrop, showCrop } from './videoview.ts';
@@ -30,7 +30,7 @@ export async function loadPicture(file: File): Promise<Picture> {
  * The cropped picture, `width` px wide at most (never above its own size).
  * PNGs stay PNG, so line art and see-through parts come out clean.
  */
-export async function pictureImage(p: Picture, aspect: number, width: number, brightness = 0): Promise<FrameImage> {
+export async function pictureImage(p: Picture, aspect: number, width: number, tone?: Tone): Promise<FrameImage> {
   const c = cropRect(p, { aspect, x: p.cropX, y: p.cropY });
   const w = Math.max(2, Math.round(Math.min(width, c.sw)));
   const h = Math.max(2, Math.round(w / aspect));
@@ -46,7 +46,7 @@ export async function pictureImage(p: Picture, aspect: number, width: number, br
   }
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(p.bitmap, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
-  applyTone(ctx, w, h, brightness);
+  applyTone(ctx, w, h, tone);
   const blob = await new Promise<Blob>((resolve, reject) =>
     canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not prepare the picture.'))), png ? 'image/png' : 'image/jpeg', 0.92),
   );

@@ -33,7 +33,7 @@ import { renderCopiesSvg, renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
 import { frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, soundPieces, type Clip, type Edit } from './sequence.ts';
 import { tc, timeline } from './timeline.ts';
-import { toneFilter } from './tone.ts';
+import { toneFilter, type Tone } from './tone.ts';
 import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, slider, steps, toggleRow, type Control } from './ui.ts';
 import { loadVideo } from './video.ts';
 import { videoView } from './videoview.ts';
@@ -81,8 +81,7 @@ export function printPanel() {
       landscape: null as boolean | null,
       border: 'none' as BorderId,
       width: null as number | null,
-      /** -100 … 100, 0 = as it is */
-      brightness: 0,
+      tone: { brightness: 0, invert: false } as Tone,
     },
     style: { borders: false, frameNumbers: true, fileName: true } as SheetStyle,
     projectId: newProjectId(),
@@ -316,11 +315,21 @@ export function printPanel() {
   const toneCtl = slider(
     'Brightness',
     { min: () => -50, max: () => 100, step: 5 },
-    () => state.copy.brightness,
-    (v) => ((state.copy.brightness = v), changed()),
-    () => (state.copy.brightness ? `${state.copy.brightness > 0 ? '+' : '−'}${Math.abs(state.copy.brightness)}` : 'Normal'),
+    () => state.copy.tone.brightness,
+    (v) => ((state.copy.tone = { ...state.copy.tone, brightness: v }), changed()),
+    () => {
+      const b = state.copy.tone.brightness;
+      return b ? `${b > 0 ? '+' : '−'}${Math.abs(b)}` : 'Normal';
+    },
   );
-  const toneField = el('div', { class: 'field' }, toneCtl.el, hint('Lifts the dark parts so they still show on paper. White stays white.'));
+  const invertCtl = toggleRow('Invert', () => state.copy.tone.invert, (v) => ((state.copy.tone = { ...state.copy.tone, invert: v }), changed()));
+  const toneField = el(
+    'div',
+    { class: 'field' },
+    toneCtl.el,
+    hint('Lifts the dark parts so they still show on paper. White stays white.'),
+    invertCtl.el,
+  );
   const paperCtl = options(
     (['A4', 'A3', 'A5', 'LT'] as PaperId[]).map((id) => ({ value: id, label: PAPERS[id].name })),
     () => (copies() ? copyPaper() : state.paper),
@@ -529,21 +538,22 @@ export function printPanel() {
   let previewRun = 0;
 
   let copyThumb: { key: string; url: string } | null = null;
+  const toneKey = () => `${state.copy.tone.brightness}|${state.copy.tone.invert}`;
   /** what the copies show: the picture or the frame, cropped */
   const copyImageKey = () =>
     usesPicture()
-      ? `${picture!.file.name}|${picture!.file.size}|${picture!.cropX}|${picture!.cropY}|${aspect().toFixed(4)}|${state.copy.brightness}`
+      ? `${picture!.file.name}|${picture!.file.size}|${picture!.cropX}|${picture!.cropY}|${aspect().toFixed(4)}|${toneKey()}`
       : clips().length
-        ? `${thumbKey(copyFrame())}|${state.copy.brightness}`
+        ? `${thumbKey(copyFrame())}|${toneKey()}`
         : '';
   const copyKey = () => JSON.stringify(['copies', copyImageKey(), copyPaper(), copyLandscape(), copyGap(), copyW(), state.style.borders]);
 
   /** The copy at `width` px (at most its own size). */
   async function copyImage(width: number): Promise<FrameImage> {
-    if (usesPicture()) return pictureImage(picture!, aspect(), width, state.copy.brightness);
+    if (usesPicture()) return pictureImage(picture!, aspect(), width, state.copy.tone);
     const k = copyFrame();
     const grab = await sequenceGrabber(clips(), state.fps, aspect(), width, [k]);
-    return grab.jpeg(k, 0.92, state.copy.brightness);
+    return grab.jpeg(k, 0.92, state.copy.tone);
   }
 
   async function renderCopies(run: number) {
@@ -611,7 +621,7 @@ export function printPanel() {
     const n = frameCount();
     const pages = pageCount(s, n);
 
-    for (const c of [makeCtl, fpsCtl, cropCtl, toneCtl, paperCtl, orientCtl, captureCtl, borderCtl, sizeCtl, ...toggles]) c.sync();
+    for (const c of [makeCtl, fpsCtl, cropCtl, toneCtl, invertCtl, paperCtl, orientCtl, captureCtl, borderCtl, sizeCtl, ...toggles]) c.sync();
     syncMode();
     captureHint.textContent =
       state.capture === 'photo'
@@ -668,8 +678,8 @@ export function printPanel() {
       : 'Every frame of the video, to paint and scan back in.';
     sourceField.hidden = !c;
     toneField.hidden = !c;
-    // the picture on screen shows the brightness the copies get
-    const look = c ? toneFilter(state.copy.brightness) : 'none';
+    // the picture on screen shows the tone the copies get
+    const look = c ? toneFilter(state.copy.tone) : 'none';
     for (const pane of [videoPane, picturePane]) pane.style.setProperty('--look', look);
     sourceNote.textContent = picture && c ? picture.file.name : 'The frame under the playhead. Move it on the timeline to pick another one.';
     usePictureBtn.textContent = picture ? 'Use another picture' : 'Use a picture';

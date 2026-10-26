@@ -6,7 +6,7 @@
 
 import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input, type InputVideoTrack, type WrappedCanvas } from 'mediabunny';
 import type { FrameImage } from '../core/pdf.ts';
-import { applyTone } from './tone.ts';
+import { applyTone, type Tone } from './tone.ts';
 import { cropRect, seek, videoElement, type LoadedVideo } from './video.ts';
 
 export interface Clip {
@@ -247,10 +247,9 @@ export async function sequenceGrabber(clips: Clip[], fps: number, aspect: number
   };
 
   return {
-    /** `brightness` -100 … 100 for print, see tone.ts */
-    async jpeg(i: number, quality = 0.9, brightness = 0): Promise<FrameImage> {
+    async jpeg(i: number, quality = 0.9, tone?: Tone): Promise<FrameImage> {
       await draw(i);
-      applyTone(ctx, w, h, brightness);
+      applyTone(ctx, w, h, tone);
       const blob = await new Promise<Blob>((resolve, reject) =>
         canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not encode a frame.'))), 'image/jpeg', quality),
       );
