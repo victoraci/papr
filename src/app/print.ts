@@ -33,6 +33,7 @@ import { renderCopiesSvg, renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
 import { frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, soundPieces, type Clip, type Edit } from './sequence.ts';
 import { tc, timeline } from './timeline.ts';
+import { toneFilter } from './tone.ts';
 import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, slider, steps, toggleRow, type Control } from './ui.ts';
 import { loadVideo } from './video.ts';
 import { videoView } from './videoview.ts';
@@ -75,7 +76,14 @@ export function printPanel() {
     make: 'animation' as Make,
     border: 'none' as BorderId,
     /** copies have their own sheet, so the frames they start from stay as printed; null = as for the frames */
-    copy: { paper: null as PaperId | null, landscape: null as boolean | null, border: 'none' as BorderId, width: null as number | null },
+    copy: {
+      paper: null as PaperId | null,
+      landscape: null as boolean | null,
+      border: 'none' as BorderId,
+      width: null as number | null,
+      /** -100 … 100, 0 = as it is */
+      brightness: 0,
+    },
     style: { borders: false, frameNumbers: true, fileName: true } as SheetStyle,
     projectId: newProjectId(),
     view: 'video' as View,
@@ -305,6 +313,14 @@ export function printPanel() {
   const sourceField = field('Copies of', sourceNote, el('div', { class: 'links' }, usePictureBtn, useFrameBtn));
   const fpsField = field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.'));
   const cropHint = hint('Drag the picture to choose what stays in the frame.');
+  const toneCtl = slider(
+    'Brightness',
+    { min: () => -50, max: () => 100, step: 5 },
+    () => state.copy.brightness,
+    (v) => ((state.copy.brightness = v), changed()),
+    () => (state.copy.brightness ? `${state.copy.brightness > 0 ? '+' : '−'}${Math.abs(state.copy.brightness)}` : 'Normal'),
+  );
+  const toneField = el('div', { class: 'field' }, toneCtl.el, hint('Lifts the dark parts so they still show on paper. White stays white.'));
   const paperCtl = options(
     (['A4', 'A3', 'A5', 'LT'] as PaperId[]).map((id) => ({ value: id, label: PAPERS[id].name })),
     () => (copies() ? copyPaper() : state.paper),
@@ -370,7 +386,7 @@ export function printPanel() {
 
   // each step has its own settings and button; the other step's are hidden
   const part = (...children: (HTMLElement | null)[]) => el('div', { class: 'step-part' }, ...children);
-  const videoGroup = group('Video', fpsField, field('Crop', cropCtl.el, cropHint));
+  const videoGroup = group('Video', fpsField, field('Crop', cropCtl.el, cropHint), toneField);
   const scanField = field('Scan with', captureCtl.el, captureHint);
   const gridField = field('Frames per sheet', gridCtl.el, frameSizeNote);
   const sizeField = el('div', { class: 'field' }, sizeCtl.el, sizeNote, sameSize);
@@ -516,18 +532,18 @@ export function printPanel() {
   /** what the copies show: the picture or the frame, cropped */
   const copyImageKey = () =>
     usesPicture()
-      ? `${picture!.file.name}|${picture!.file.size}|${picture!.cropX}|${picture!.cropY}|${aspect().toFixed(4)}`
+      ? `${picture!.file.name}|${picture!.file.size}|${picture!.cropX}|${picture!.cropY}|${aspect().toFixed(4)}|${state.copy.brightness}`
       : clips().length
-        ? thumbKey(copyFrame())
+        ? `${thumbKey(copyFrame())}|${state.copy.brightness}`
         : '';
   const copyKey = () => JSON.stringify(['copies', copyImageKey(), copyPaper(), copyLandscape(), copyGap(), copyW(), state.style.borders]);
 
   /** The copy at `width` px (at most its own size). */
   async function copyImage(width: number): Promise<FrameImage> {
-    if (usesPicture()) return pictureImage(picture!, aspect(), width);
+    if (usesPicture()) return pictureImage(picture!, aspect(), width, state.copy.brightness);
     const k = copyFrame();
     const grab = await sequenceGrabber(clips(), state.fps, aspect(), width, [k]);
-    return grab.jpeg(k, 0.92);
+    return grab.jpeg(k, 0.92, state.copy.brightness);
   }
 
   async function renderCopies(run: number) {
@@ -595,7 +611,7 @@ export function printPanel() {
     const n = frameCount();
     const pages = pageCount(s, n);
 
-    for (const c of [makeCtl, fpsCtl, cropCtl, paperCtl, orientCtl, captureCtl, borderCtl, sizeCtl, ...toggles]) c.sync();
+    for (const c of [makeCtl, fpsCtl, cropCtl, toneCtl, paperCtl, orientCtl, captureCtl, borderCtl, sizeCtl, ...toggles]) c.sync();
     syncMode();
     captureHint.textContent =
       state.capture === 'photo'
@@ -651,6 +667,10 @@ export function printPanel() {
       ? 'One picture repeated over the sheet, without codes. For stencils and cut-outs.'
       : 'Every frame of the video, to paint and scan back in.';
     sourceField.hidden = !c;
+    toneField.hidden = !c;
+    // the picture on screen shows the brightness the copies get
+    const look = c ? toneFilter(state.copy.brightness) : 'none';
+    for (const pane of [videoPane, picturePane]) pane.style.setProperty('--look', look);
     sourceNote.textContent = picture && c ? picture.file.name : 'The frame under the playhead. Move it on the timeline to pick another one.';
     usePictureBtn.textContent = picture ? 'Use another picture' : 'Use a picture';
     useFrameBtn.hidden = !picture || !clips().length;

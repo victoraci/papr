@@ -678,6 +678,7 @@ input[type='range']::-moz-range-thumb {
   display: block;
   width: 100%;
   height: 100%;
+  filter: var(--look, none);
 }
 
 .crop-box {
