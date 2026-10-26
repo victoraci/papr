@@ -31,6 +31,24 @@ const WHITE = rgb(1, 1, 1);
 const GREY = rgb(0.45, 0.45, 0.45);
 const BORDER = rgb(0.15, 0.15, 0.15);
 
+/**
+ * A sheet of copies of one picture: the picture in every cell, embedded
+ * once, and an optional thin line around each copy to cut along.
+ */
+export async function buildCopiesPdf(input: { pageW: number; pageH: number; cells: Rect[]; image: FrameImage; outline: boolean; title?: string }): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  doc.setTitle(input.title ? `PAPR · ${input.title}` : 'PAPR');
+  doc.setCreator('PAPR');
+  const page = doc.addPage([input.pageW * PT, input.pageH * PT]);
+  const image = input.image.type === 'jpg' ? await doc.embedJpg(input.image.bytes) : await doc.embedPng(input.image.bytes);
+  for (const r of input.cells) {
+    const box = { x: r.x * PT, y: (input.pageH - r.y - r.h) * PT, width: r.w * PT, height: r.h * PT };
+    page.drawImage(image, box);
+    if (input.outline) page.drawRectangle({ ...box, borderColor: BORDER, borderWidth: 0.2 * PT });
+  }
+  return doc.save();
+}
+
 export function pageCount(spec: SheetSpec, frameCount: number): number {
   return Math.max(1, Math.ceil(frameCount / framesPerPage(spec)));
 }

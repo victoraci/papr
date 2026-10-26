@@ -65,3 +65,13 @@ export async function renderSheetSvg(
   await drawSheet(c, { layout, payload, style, title });
   return c.root;
 }
+
+/** A sheet of copies, as buildCopiesPdf() draws it. */
+export function renderCopiesSvg(pageW: number, pageH: number, cells: Rect[], href: string | undefined, outline: boolean): SVGSVGElement {
+  const c = new SvgCanvas(pageW, pageH, () => href);
+  for (const r of cells) {
+    c.frame(0, r);
+    if (outline) c.outline({ x: r.x + 0.1, y: r.y + 0.1, w: r.w - 0.2, h: r.h - 0.2 }, 0.2);
+  }
+  return c.root;
+}

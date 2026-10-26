@@ -2,14 +2,21 @@
 // them together on the timeline, pick the frame rate and crop. 2 Paper:
 // everything about the sheets, then download the PDF. Both steps can be
 // opened at any time.
+//
+// Besides the animation: copies of one picture (a frame of the video or a
+// picture of your own) over a whole sheet, without anything to scan.
 
 import {
   BORDERS,
   computeLayout,
+  copiesCells,
+  copiesChoices,
+  copiesGap,
   gapForBorder,
   gridChoices,
   LAYOUT_VERSION,
   PAPERS,
+  pageSize,
   PHOTO_LAYOUT,
   specForGrid,
   validateSpec,
@@ -19,12 +26,13 @@ import {
   type SheetSpec,
 } from '../core/layout.ts';
 import { framesPerPage, newProjectId } from '../core/payload.ts';
-import { buildSheetsPdf, pageCount } from '../core/pdf.ts';
+import { buildCopiesPdf, buildSheetsPdf, pageCount, type FrameImage } from '../core/pdf.ts';
 import type { SheetStyle } from '../core/sheet.ts';
-import { renderSheetSvg } from './preview.ts';
+import { loadPicture, pictureImage, pictureView, type Picture } from './pictureview.ts';
+import { renderCopiesSvg, renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
 import { frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, soundPieces, type Clip, type Edit } from './sequence.ts';
-import { timeline } from './timeline.ts';
+import { tc, timeline } from './timeline.ts';
 import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, steps, toggleRow, type Control } from './ui.ts';
 import { loadVideo } from './video.ts';
 import { videoView } from './videoview.ts';
@@ -40,8 +48,15 @@ const CROPS: { value: string; ratio: number }[] = [
 const MAX_GRID_OPTIONS = 8;
 
 type View = 'video' | 'sheets';
+/** What the sheets hold: every frame to animate, or copies of one picture. */
+type Make = 'animation' | 'copies';
 /** How the painted sheets come back in; photos get a sheet with more to hold on to. */
 type Capture = 'scanner' | 'photo';
+
+/** The grid closest to `count` pictures per sheet. */
+function nearest(list: GridChoice[], count: number): GridChoice | undefined {
+  return list.reduce<GridChoice | undefined>((best, c) => (!best || Math.abs(c.count - count) < Math.abs(best.count - count) ? c : best), undefined);
+}
 
 /** Up to `max` options, spread evenly over the list. */
 function spread<T>(list: T[], max: number): T[] {
@@ -57,6 +72,8 @@ export function printPanel() {
     landscape: true,
     capture: 'scanner' as Capture,
     count: 9,
+    make: 'animation' as Make,
+    copies: 8,
     border: 'none' as BorderId,
     style: { borders: false, frameNumbers: true, fileName: true } as SheetStyle,
     projectId: newProjectId(),
@@ -71,21 +88,28 @@ export function printPanel() {
   let draft: Edit | null = null;
   const current = () => draft ?? edit.get();
   const clips = () => current().clips;
+  /** a picture of your own for copies; without one, copies show the frame under the playhead */
+  let picture: Picture | null = null;
+  const copies = () => state.make === 'copies';
+  const usesPicture = () => copies() && !!picture;
 
   // --- derived ---
   const aspect = () => {
     const c = CROPS.find((x) => x.value === state.crop);
     if (c) return c.ratio;
-    const first = clips()[0];
+    if (usesPicture()) return picture!.width / picture!.height;
+    const first = (copies() ? view.current() : null) ?? clips()[0];
     return first ? first.video.width / first.video.height : 16 / 9;
   };
   const version = () => (state.capture === 'photo' ? PHOTO_LAYOUT : LAYOUT_VERSION);
   const gap = () => gapForBorder(BORDERS[state.border], version());
   const choices = (): GridChoice[] => spread(gridChoices(state.paper, state.landscape, aspect(), gap(), 20, version()), MAX_GRID_OPTIONS);
-  const choice = (): GridChoice => {
-    const list = choices();
-    return list.reduce((best, c) => (Math.abs(c.count - state.count) < Math.abs(best.count - state.count) ? c : best), list[0]);
-  };
+  const choice = (): GridChoice => nearest(choices(), state.count)!;
+  const copyGap = () => copiesGap(BORDERS[state.border]);
+  const copyChoices = (): GridChoice[] => spread(copiesChoices(state.paper, state.landscape, aspect(), copyGap()), MAX_GRID_OPTIONS);
+  const copyChoice = () => nearest(copyChoices(), state.copies);
+  /** the frame under the playhead */
+  const copyFrame = () => Math.min(frameCount() - 1, Math.round(view.time() * state.fps));
   const spec = (): SheetSpec => specForGrid(state.paper, state.landscape, aspect(), gap(), choice(), version());
   const frameCount = () => Math.max(1, countFrames(clips(), state.fps));
   const pdfKey = () =>
@@ -98,12 +122,14 @@ export function printPanel() {
 
   // --- before a video is in ---
   const picker = filePicker('video/*', true, (f) => void addVideos(f));
+  const picturePicker = filePicker('image/*', false, (f) => void usePicture(f[0]));
   const intakeNote = el('p', { class: 'hint' });
   const intake = el(
     'div',
     { class: 'intake' },
     el('h1', { textContent: 'Drop a video here' }),
     el('button', { class: 'primary', textContent: 'Choose a video', onclick: picker.open }),
+    el('button', { class: 'link', textContent: 'Print copies of a picture', onclick: picturePicker.open }),
     intakeNote,
   );
 
@@ -118,9 +144,19 @@ export function printPanel() {
       if (done) edit.push(next);
       if (done) changed('video');
     },
-    onTime: () => tl.tick(),
+    onTime: () => (tl.tick(), copies() && syncVideoSummary()),
     onPlay: () => tl.sync(),
   });
+  const picView = pictureView({
+    picture: () => picture,
+    aspect,
+    onCrop(x, y, done) {
+      if (!picture) return;
+      picture = { ...picture, cropX: x, cropY: y };
+      if (done) changed('video');
+    },
+  });
+  const picturePane = el('div', { class: 'video-pane', hidden: true }, picView.el);
   const tl = timeline({
     edit: current,
     fps: () => state.fps,
@@ -141,6 +177,7 @@ export function printPanel() {
     seek(t) {
       view.seek(t);
       tl.sync();
+      if (copies()) syncVideoSummary();
     },
     playing: () => view.playing(),
     togglePlay() {
@@ -161,7 +198,8 @@ export function printPanel() {
   const pageLabel = el('span');
   const prev = el('button', { class: 'link', textContent: 'Previous', onclick: () => turn(-1) });
   const nextPage = el('button', { class: 'link', textContent: 'Next', onclick: () => turn(1) });
-  const sheetPane = el('div', { class: 'sheet-pane', hidden: true }, sheet, el('div', { class: 'pager' }, prev, pageLabel, nextPage));
+  const pager = el('div', { class: 'pager' }, prev, pageLabel, nextPage);
+  const sheetPane = el('div', { class: 'sheet-pane', hidden: true }, sheet, pager);
 
   const stepCtl = steps<View>(
     [
@@ -177,15 +215,21 @@ export function printPanel() {
     if (v === state.view) return;
     state.view = v;
     stepCtl.sync();
-    videoPane.hidden = v !== 'video';
-    sheetPane.hidden = v !== 'sheets';
     for (const part of videoParts) part.hidden = v !== 'video';
     for (const part of paperParts) part.hidden = v !== 'sheets';
-    if (v === 'video') view.refresh();
-    else {
-      view.pause();
-      void renderPreview();
-    }
+    syncPanes();
+    if (v === 'sheets') void renderPreview();
+  }
+
+  /** The view: video and timeline, the picture of your own, or the sheets. */
+  function syncPanes() {
+    const video = state.view === 'video';
+    videoPane.hidden = !video || usesPicture();
+    picturePane.hidden = !video || !usesPicture();
+    sheetPane.hidden = video;
+    if (videoPane.hidden) view.pause();
+    else view.refresh();
+    if (!picturePane.hidden) picView.refresh();
     tl.sync();
   }
 
@@ -195,7 +239,13 @@ export function printPanel() {
   const fpsCtl = options(
     FPS_CHOICES.map((f) => ({ value: f, label: String(f) })),
     () => state.fps,
-    (v) => ((state.fps = v), changed('video')),
+    (v) => {
+      // the playhead stays at the same time, not the same frame number
+      const t = view.time();
+      state.fps = v;
+      view.seek(t);
+      changed('video');
+    },
   );
   const cropCtl = options(
     [{ value: 'original', label: 'Original' }, ...CROPS.map((c) => ({ value: c.value, label: c.value }))],
@@ -203,10 +253,38 @@ export function printPanel() {
     (v) => {
       state.crop = v;
       edit.replace({ ...edit.get(), clips: edit.get().clips.map((c) => ({ ...c, cropX: 0.5, cropY: 0.5 })) });
+      if (picture) picture = { ...picture, cropX: 0.5, cropY: 0.5 };
       view.refresh();
+      picView.refresh();
       changed('video');
     },
   );
+  const makeCtl = options<Make>(
+    [
+      { value: 'animation', label: 'Animation' },
+      { value: 'copies', label: 'Copies' },
+    ],
+    () => state.make,
+    (v) => {
+      state.make = v;
+      syncPanes();
+      changed('video');
+    },
+  );
+  const makeHint = hint();
+  const sourceNote = hint();
+  const usePictureBtn = el('button', { class: 'link', textContent: 'Use a picture', onclick: picturePicker.open });
+  const useFrameBtn = el('button', {
+    class: 'link',
+    textContent: 'Use the video instead',
+    onclick: () => {
+      picture = null;
+      syncPanes();
+      changed('video');
+    },
+  });
+  const sourceField = field('Copies of', sourceNote, el('div', { class: 'links' }, usePictureBtn, useFrameBtn));
+  const fpsField = field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.'));
   const cropHint = hint('Drag the picture to choose what stays in the frame.');
   const paperCtl = options(
     (['A4', 'A3', 'A5', 'LT'] as PaperId[]).map((id) => ({ value: id, label: PAPERS[id].name })),
@@ -230,7 +308,11 @@ export function printPanel() {
     (v) => ((state.capture = v), changed('sheets')),
   );
   const captureHint = hint();
-  const gridCtl = options([], () => choice().count, (v) => ((state.count = v), changed('sheets')));
+  const gridCtl = options(
+    [],
+    () => (copies() ? (copyChoice()?.count ?? 0) : choice().count),
+    (v) => (copies() ? (state.copies = v) : (state.count = v), changed('sheets')),
+  );
   const frameSizeNote = hint();
   const borderCtl = options<BorderId>(
     [
@@ -254,11 +336,17 @@ export function printPanel() {
 
   // each step has its own settings and button; the other step's are hidden
   const part = (...children: (HTMLElement | null)[]) => el('div', { class: 'step-part' }, ...children);
+  const videoGroup = group('Video', fpsField, field('Crop', cropCtl.el, cropHint));
+  const scanField = field('Scan with', captureCtl.el, captureHint);
+  const gridField = field('Frames per sheet', gridCtl.el, frameSizeNote);
+  const borderHint = hint();
+  const outlineHint = hint('The thin line helps photos line up when your video is white at the edges.');
   const videoParts = [
     part(
       el('div', { class: 'file' }, fileName, el('button', { class: 'link', textContent: 'Add video', onclick: picker.open })),
       fileNote,
-      group('Video', field('Frames per second', fpsCtl.el, hint('Animation on paper usually runs at 8 or 12.')), field('Crop', cropCtl.el, cropHint)),
+      group('What to print', makeCtl.el, makeHint, sourceField),
+      videoGroup,
     ),
     part(next, videoSummary),
   ];
@@ -268,14 +356,10 @@ export function printPanel() {
         'Paper',
         field('Size', paperCtl.el),
         field('Orientation', orientCtl.el),
-        field('Scan with', captureCtl.el, captureHint),
-        field('Frames per sheet', gridCtl.el, frameSizeNote),
+        scanField,
+        gridField,
       ),
-      more(
-        field('White border', borderCtl.el, hint('Blank paper around each frame to paint past the edge. You can keep it in the finished video.')),
-        el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)),
-        hint('The thin line helps photos line up when your video is white at the edges.'),
-      ),
+      more(field('White border', borderCtl.el, borderHint), el('div', { class: 'toggles' }, ...toggles.map((t) => t.el)), outlineHint),
     ),
     part(download, summary, pdfNote),
   ];
@@ -286,8 +370,39 @@ export function printPanel() {
     'div',
     { class: 'work', hidden: true },
     controls,
-    el('div', { class: 'view' }, el('div', { class: 'view-head' }, stepCtl.el), videoPane, sheetPane),
+    el('div', { class: 'view' }, el('div', { class: 'view-head' }, stepCtl.el), videoPane, picturePane, sheetPane),
   );
+
+  /** Dropped files: videos go into the edit, a picture becomes the one for copies. */
+  function addFiles(files: File[], at?: number) {
+    const pictures = files.filter((f) => f.type.startsWith('image/'));
+    const videos = files.filter((f) => !f.type.startsWith('image/'));
+    if (pictures.length) void usePicture(pictures[0]);
+    if (videos.length) void addVideos(videos, at);
+  }
+
+  async function usePicture(file: File) {
+    const fresh = work.hidden;
+    const note = fresh ? intakeNote : fileNote;
+    try {
+      picture = await loadPicture(file);
+    } catch (e) {
+      note.className = 'warn';
+      note.textContent = `${file.name}: ${e instanceof Error ? e.message : String(e)}`;
+      return;
+    }
+    note.textContent = '';
+    state.make = 'copies';
+    if (fresh) {
+      state.crop = 'original';
+      state.landscape = picture.width >= picture.height;
+    }
+    intake.hidden = true;
+    work.hidden = false;
+    show('video');
+    syncPanes();
+    changed('video');
+  }
 
   /** New videos go to the end of the edit, or where they were dropped on the timeline. */
   async function addVideos(files: File[], at?: number) {
@@ -327,7 +442,7 @@ export function printPanel() {
   // --- keyboard, like in an editor ---
   document.addEventListener('keydown', (e) => {
     // editing keys belong to the video step
-    if (page.hidden || work.hidden || state.busy || state.view !== 'video') return;
+    if (page.hidden || work.hidden || state.busy || state.view !== 'video' || usesPicture()) return;
     if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) return;
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
@@ -361,8 +476,44 @@ export function printPanel() {
   };
   let previewRun = 0;
 
+  let copyThumb: { key: string; url: string } | null = null;
+  /** what the copies show: the picture or the frame, cropped */
+  const copyImageKey = () =>
+    usesPicture()
+      ? `${picture!.file.name}|${picture!.file.size}|${picture!.cropX}|${picture!.cropY}|${aspect().toFixed(4)}`
+      : clips().length
+        ? thumbKey(copyFrame())
+        : '';
+  const copyKey = () => JSON.stringify(['copies', copyImageKey(), state.paper, state.landscape, state.border, copyChoice(), state.style.borders]);
+
+  /** The copy at `width` px (at most its own size). */
+  async function copyImage(width: number): Promise<FrameImage> {
+    if (usesPicture()) return pictureImage(picture!, aspect(), width);
+    const k = copyFrame();
+    const grab = await sequenceGrabber(clips(), state.fps, aspect(), width, [k]);
+    return grab.jpeg(k, 0.92);
+  }
+
+  async function renderCopies(run: number) {
+    const g = copyChoice();
+    if (!g || !copyImageKey()) return void sheet.replaceChildren();
+    const { w, h } = pageSize(state.paper, state.landscape);
+    const cells = copiesCells(state.paper, state.landscape, aspect(), copyGap(), g);
+    const key = copyImageKey();
+    const draw = () => sheet.replaceChildren(renderCopiesSvg(w, h, cells, copyThumb?.key === key ? copyThumb.url : undefined, state.style.borders));
+    draw();
+    if (copyThumb?.key === key) return;
+    const img = await copyImage(480);
+    if (run !== previewRun) return;
+    if (copyThumb) URL.revokeObjectURL(copyThumb.url);
+    copyThumb = { key, url: URL.createObjectURL(new Blob([img.bytes as BlobPart], { type: img.type === 'png' ? 'image/png' : 'image/jpeg' })) };
+    draw();
+  }
+
   async function renderPreview() {
     const run = ++previewRun;
+    pager.hidden = copies();
+    if (copies()) return renderCopies(run);
     const s = spec();
     if (validateSpec(s)) return;
     const layout = computeLayout(s);
@@ -409,31 +560,81 @@ export function printPanel() {
     const n = frameCount();
     const pages = pageCount(s, n);
 
-    for (const c of [fpsCtl, cropCtl, paperCtl, orientCtl, captureCtl, borderCtl, ...toggles]) c.sync();
+    for (const c of [makeCtl, fpsCtl, cropCtl, paperCtl, orientCtl, captureCtl, borderCtl, ...toggles]) c.sync();
+    syncMode();
     captureHint.textContent =
       state.capture === 'photo'
         ? 'Small squares between the frames keep photos of curved or painted paper in line.'
         : 'Only the four corners get printed. Photos work too, as long as the paper lies flat.';
     cropHint.hidden = state.crop === 'original';
-    gridCtl.setOptions(choices().map((c) => ({ value: c.count, label: String(c.count) })));
-    frameSizeNote.textContent = `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;
+    gridCtl.setOptions((copies() ? copyChoices() : choices()).map((c) => ({ value: c.count, label: String(c.count) })));
+    const g = copyChoice();
+    frameSizeNote.textContent = copies()
+      ? g
+        ? `Each copy ${g.frameW} × ${Math.round(g.frameW / aspect())} mm`
+        : ''
+      : `Each frame ${s.frameW} × ${Math.round(s.frameW / s.aspect)} mm`;
 
     tl.sync();
     const names = videoNames();
-    fileName.textContent = names.length > 1 ? `${names.length} videos` : (names[0] ?? 'No video');
+    fileName.textContent = names.length > 1 ? `${names.length} videos` : (names[0] ?? (picture ? 'No video yet' : 'No video'));
     fileName.title = names.join(', ');
 
-    const err = clips().length ? validateSpec(s) : 'Add a video to make sheets.';
+    const paperName = `${PAPERS[state.paper].name} ${state.landscape ? 'landscape' : 'portrait'}`;
+    const err = copies()
+      ? !copyImageKey()
+        ? 'Add a video or a picture first.'
+        : !g
+          ? 'This picture doesn’t fit on the sheet.'
+          : null
+      : clips().length
+        ? validateSpec(s)
+        : 'Add a video to make sheets.';
     download.disabled = !!err || state.busy;
-    next.disabled = !clips().length;
-    videoSummary.textContent = clips().length
-      ? `${plural(n, 'frame', 'frames')} · ${(n / state.fps).toFixed(1)} s at ${state.fps} fps`
-      : 'Add a video to start.';
+    next.disabled = copies() ? !copyImageKey() : !clips().length;
+    syncVideoSummary();
     summary.className = err ? 'warn' : 'hint';
     summary.textContent =
-      err ?? `${plural(n, 'frame', 'frames')} on ${plural(pages, 'sheet', 'sheets')} · ${PAPERS[s.paper].name} ${s.landscape ? 'landscape' : 'portrait'}`;
-    if (last && last.key !== pdfKey()) pdfNote.textContent = '';
+      err ??
+      (copies() ? `${plural(g!.count, 'copy', 'copies')} on one sheet · ${paperName}` : `${plural(n, 'frame', 'frames')} on ${plural(pages, 'sheet', 'sheets')} · ${paperName}`);
+    if (last && last.key !== (copies() ? copyKey() : pdfKey())) pdfNote.textContent = '';
     if (state.view === 'sheets') void renderPreview();
+  }
+
+  /** Settings that only one of the two kinds of sheet has. */
+  function syncMode() {
+    const c = copies();
+    makeHint.textContent = c
+      ? 'One picture repeated over the sheet, without codes. For stencils and cut-outs.'
+      : 'Every frame of the video, to paint and scan back in.';
+    sourceField.hidden = !c;
+    sourceNote.textContent = picture && c ? picture.file.name : 'The frame under the playhead. Move it on the timeline to pick another one.';
+    usePictureBtn.textContent = picture ? 'Use another picture' : 'Use a picture';
+    useFrameBtn.hidden = !picture || !clips().length;
+    fpsField.hidden = c;
+    videoGroup.querySelector('.group-title')!.textContent = usesPicture() ? 'Picture' : 'Video';
+    scanField.hidden = c;
+    gridField.querySelector('.field-label')!.textContent = c ? 'Copies per sheet' : 'Frames per sheet';
+    toggles[0].el.firstElementChild!.textContent = c ? 'Thin line around each copy' : 'Thin line around each frame';
+    toggles[1].el.hidden = c;
+    toggles[2].el.hidden = c;
+    outlineHint.hidden = c;
+    borderHint.textContent = c
+      ? 'Blank paper around each copy.'
+      : 'Blank paper around each frame to paint past the edge. You can keep it in the finished video.';
+  }
+
+  function syncVideoSummary() {
+    const n = frameCount();
+    if (copies()) {
+      const clip = view.current();
+      videoSummary.textContent = usesPicture()
+        ? `${picture!.width} × ${picture!.height} px`
+        : clip
+          ? `Frame ${tc(view.time(), state.fps)} of ${clip.video.file.name}`
+          : 'Add a video or a picture to start.';
+    } else
+      videoSummary.textContent = clips().length ? `${plural(n, 'frame', 'frames')} · ${(n / state.fps).toFixed(1)} s at ${state.fps} fps` : 'Add a video to start.';
   }
 
   /** What the Scan side needs to put the sound back under the scans. */
@@ -442,7 +643,43 @@ export function printPanel() {
     printed.set(id, { pieces });
   }
 
+  async function createCopiesPdf() {
+    const g = copyChoice();
+    if (!g || !copyImageKey() || state.busy) return;
+    const key = copyKey();
+    if (last?.key === key) return saveFile(last.url, last.name);
+    state.busy = true;
+    download.disabled = true;
+    download.textContent = 'Preparing the picture…';
+    pdfNote.className = 'hint';
+    try {
+      const name = usesPicture() ? picture!.file.name : (view.current()?.video.file.name ?? 'video');
+      const { w, h } = pageSize(state.paper, state.landscape);
+      const bytes = await buildCopiesPdf({
+        pageW: w,
+        pageH: h,
+        cells: copiesCells(state.paper, state.landscape, aspect(), copyGap(), g),
+        image: await copyImage((g.frameW / 25.4) * 300), // ~300 dpi
+        outline: state.style.borders,
+        title: name,
+      });
+      const slug = name.replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '-').slice(0, 40);
+      if (last) URL.revokeObjectURL(last.url);
+      last = { key, url: URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/pdf' })), name: `papr-copies-${slug}.pdf` };
+      saveFile(last.url, last.name);
+      pdfNote.textContent = `${last.name} · ${mb(bytes.length)}. Print at 100 % or fit to page.`;
+    } catch (e) {
+      pdfNote.className = 'warn';
+      pdfNote.textContent = e instanceof Error ? e.message : String(e);
+    } finally {
+      state.busy = false;
+      download.textContent = 'Download PDF';
+      download.disabled = false;
+    }
+  }
+
   async function createPdf() {
+    if (copies()) return createCopiesPdf();
     const list = edit.get().clips;
     const s = spec();
     if (!list.length || validateSpec(s) || state.busy) return;
@@ -492,6 +729,6 @@ export function printPanel() {
   }
 
   const page = el('section', { class: 'page' }, intake, work);
-  dropTarget(page, 'video/*', true, (f) => void addVideos(f));
+  dropTarget(page, 'video/*,image/*', true, (f) => addFiles(f));
   return { el: page, open: (f: File) => addVideos([f]), addVideos, state, clips, edit: current };
 }

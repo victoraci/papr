@@ -334,3 +334,44 @@ export function markerCorners(m: MarkerPlace): [number, number][] {
     [m.x, m.y + m.size],
   ];
 }
+
+// --- copies: one picture over the whole sheet, nothing to scan ---
+
+/** Copies have no anchors, QR code or text, so the grid gets the page inside the printer margin. */
+export function copiesArea(paper: PaperId, landscape: boolean): Rect {
+  const { w, h } = pageSize(paper, landscape);
+  return { x: EDGE, y: EDGE, w: w - 2 * EDGE, h: h - 2 * EDGE };
+}
+
+/** Space between copies, mm: enough to cut between them, or both white borders. */
+export function copiesGap(border: number): number {
+  return border > 0 ? 2 * border : 3;
+}
+
+/** "Copies per sheet" options, as for frames: for every grid the biggest copies that fit. */
+export function copiesChoices(paper: PaperId, landscape: boolean, aspect: number, gap: number, minSize = 15): GridChoice[] {
+  const area = copiesArea(paper, landscape);
+  const best = new Map<number, GridChoice>();
+  for (let cols = 1; cols <= 12; cols++)
+    for (let rows = 1; rows <= 16; rows++) {
+      const w = Math.floor(Math.min((area.w - (cols - 1) * gap) / cols, ((area.h - (rows - 1) * gap) / rows) * aspect));
+      if (w < minSize || w / aspect < minSize) continue;
+      const count = cols * rows;
+      const prev = best.get(count);
+      if (!prev || w > prev.frameW) best.set(count, { cols, rows, count, frameW: w });
+    }
+  const sorted = [...best.values()].sort((a, b) => a.count - b.count);
+  return sorted.filter((c, i) => !sorted.slice(i + 1).some((d) => d.frameW >= c.frameW));
+}
+
+/** Where the copies go: the grid in the middle of the page. */
+export function copiesCells(paper: PaperId, landscape: boolean, aspect: number, gap: number, g: GridChoice): Rect[] {
+  const area = copiesArea(paper, landscape);
+  const w = g.frameW;
+  const h = w / aspect;
+  const x0 = area.x + (area.w - (g.cols * w + (g.cols - 1) * gap)) / 2;
+  const y0 = area.y + (area.h - (g.rows * h + (g.rows - 1) * gap)) / 2;
+  const cells: Rect[] = [];
+  for (let r = 0; r < g.rows; r++) for (let c = 0; c < g.cols; c++) cells.push({ x: x0 + c * (w + gap), y: y0 + r * (h + gap), w, h });
+  return cells;
+}

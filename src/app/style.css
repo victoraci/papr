@@ -126,6 +126,13 @@ button.link:hover {
   color: var(--text);
 }
 
+/* a few link buttons in a row */
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
 :focus-visible {
   outline: 1px solid var(--muted);
   outline-offset: 3px;
@@ -298,6 +305,12 @@ button.link:hover {
 .intake .hint {
   margin-top: -10px;
   font-size: 15px;
+}
+
+.intake button.link {
+  justify-self: center;
+  margin-top: -6px;
+  font-size: 14px;
 }
 
 .work {

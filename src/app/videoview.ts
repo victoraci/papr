@@ -41,6 +41,57 @@ interface Player {
   el: HTMLVideoElement;
 }
 
+/** Puts the crop box over the part of the picture that gets printed. */
+export function showCrop(wrap: HTMLElement, box: HTMLElement, size: { width: number; height: number }, crop: { x: number; y: number }, aspect: number) {
+  const c = cropRect(size, { aspect, x: crop.x, y: crop.y });
+  const movable = c.sw < size.width - 1 || c.sh < size.height - 1;
+  box.hidden = !movable;
+  box.style.left = `${(c.sx / size.width) * 100}%`;
+  box.style.top = `${(c.sy / size.height) * 100}%`;
+  box.style.width = `${(c.sw / size.width) * 100}%`;
+  box.style.height = `${(c.sh / size.height) * 100}%`;
+  wrap.classList.toggle('movable', movable);
+}
+
+/** Dragging on a picture moves its crop; a press without moving is a click. */
+export function dragCrop(
+  wrap: HTMLElement,
+  e: PointerEvent,
+  size: { width: number; height: number },
+  crop: { x: number; y: number },
+  aspect: number,
+  on: { move(x: number, y: number): void; done(x: number, y: number): void; click(): void },
+) {
+  e.preventDefault();
+  wrap.setPointerCapture(e.pointerId);
+  const r = wrap.getBoundingClientRect();
+  const c = cropRect(size, { aspect, x: crop.x, y: crop.y });
+  // slack = how far the crop can move, as a share of the shown picture
+  const slackX = (size.width - c.sw) / size.width;
+  const slackY = (size.height - c.sh) / size.height;
+  const movable = slackX > 1 / size.width || slackY > 1 / size.height;
+  let dragged = false;
+  let last = { ...crop };
+  wrap.onpointermove = (m) => {
+    if (!dragged && Math.hypot(m.clientX - e.clientX, m.clientY - e.clientY) < 4) return;
+    dragged = true;
+    if (!movable) return;
+    const dx = (m.clientX - e.clientX) / r.width;
+    const dy = (m.clientY - e.clientY) / r.height;
+    last = {
+      x: slackX > 0 ? Math.min(1, Math.max(0, crop.x + dx / slackX)) : 0.5,
+      y: slackY > 0 ? Math.min(1, Math.max(0, crop.y + dy / slackY)) : 0.5,
+    };
+    on.move(last.x, last.y);
+  };
+  wrap.onpointerup = () => {
+    wrap.onpointermove = null;
+    wrap.onpointerup = null;
+    if (!dragged) on.click();
+    else if (movable) on.done(last.x, last.y);
+  };
+}
+
 const carriesOn = (a: Clip, b: Clip) => a.video.url === b.video.url && Math.abs(b.from - a.to) < JOIN;
 
 export function videoView(host: ViewHost) {
@@ -122,14 +173,7 @@ export function videoView(host: ViewHost) {
   function syncCrop() {
     const clip = current();
     if (!clip) return;
-    const v = clip.video;
-    const c = cropRect(v, { aspect: host.aspect(), x: clip.cropX, y: clip.cropY });
-    box.hidden = !movable(clip);
-    box.style.left = `${(c.sx / v.width) * 100}%`;
-    box.style.top = `${(c.sy / v.height) * 100}%`;
-    box.style.width = `${(c.sw / v.width) * 100}%`;
-    box.style.height = `${(c.sh / v.height) * 100}%`;
-    wrap.classList.toggle('movable', movable(clip));
+    showCrop(wrap, box, clip.video, { x: clip.cropX, y: clip.cropY }, host.aspect());
     wrap.title = movable(clip) ? 'Drag to move the crop, click to play or pause' : 'Click to play or pause';
   }
 
@@ -359,36 +403,11 @@ export function videoView(host: ViewHost) {
   wrap.onpointerdown = (e) => {
     const clip = current();
     if (!clip) return;
-    e.preventDefault();
-    wrap.setPointerCapture(e.pointerId);
-    const r = wrap.getBoundingClientRect();
-    const v = clip.video;
-    const start = { x: e.clientX, y: e.clientY, cx: clip.cropX, cy: clip.cropY };
-    const c = cropRect(v, { aspect: host.aspect(), x: clip.cropX, y: clip.cropY });
-    // slack = how far the crop can move, as a share of the shown picture
-    const slackX = (v.width - c.sw) / v.width;
-    const slackY = (v.height - c.sh) / v.height;
-    let dragged = false;
-    let last = { x: start.cx, y: start.cy };
-    wrap.onpointermove = (m) => {
-      if (!dragged && Math.hypot(m.clientX - start.x, m.clientY - start.y) < 4) return;
-      dragged = true;
-      if (!movable(clip)) return;
-      const dx = (m.clientX - start.x) / r.width;
-      const dy = (m.clientY - start.y) / r.height;
-      last = {
-        x: slackX > 0 ? Math.min(1, Math.max(0, start.cx + dx / slackX)) : 0.5,
-        y: slackY > 0 ? Math.min(1, Math.max(0, start.cy + dy / slackY)) : 0.5,
-      };
-      host.onCrop(clip.id, last.x, last.y, false);
-      syncCrop();
-    };
-    wrap.onpointerup = () => {
-      wrap.onpointermove = null;
-      wrap.onpointerup = null;
-      if (dragged) host.onCrop(clip.id, last.x, last.y, true);
-      else toggle();
-    };
+    dragCrop(wrap, e, clip.video, { x: clip.cropX, y: clip.cropY }, host.aspect(), {
+      move: (x, y) => (host.onCrop(clip.id, x, y, false), syncCrop()),
+      done: (x, y) => host.onCrop(clip.id, x, y, true),
+      click: toggle,
+    });
   };
 
   function pause() {
