@@ -4,7 +4,7 @@
 // stay as they are. The printed frames are sampled from the clips at the
 // print frame rate.
 
-import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input } from 'mediabunny';
+import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input, type InputVideoTrack, type WrappedCanvas } from 'mediabunny';
 import type { FrameImage } from '../core/pdf.ts';
 import { cropRect, seek, videoElement, type LoadedVideo } from './video.ts';
 
@@ -213,11 +213,14 @@ export function history(initial: Edit = emptyEdit()) {
 }
 
 /**
- * Grabs the printed frames of an edit in order, cropped and scaled to
- * `width` px. One video element per file, so going from clip to clip of the
- * same video doesn't reload it.
+ * Grabs the printed frames of an edit, cropped and scaled to `width` px.
+ * `order` lists the frames that will be asked for, in that order: those are
+ * decoded straight through, clip by clip, which is many times faster than
+ * seeking for each one (a seek can mean decoding seconds of video for videos
+ * with few key frames). Frames asked for out of that order, and videos the
+ * decoder can't take, are seeked for with one video element per file.
  */
-export async function sequenceGrabber(clips: Clip[], fps: number, aspect: number, width: number) {
+export async function sequenceGrabber(clips: Clip[], fps: number, aspect: number, width: number, order: number[] = []) {
   const els = new Map<string, HTMLVideoElement>();
   const widest = Math.max(...clips.map((c) => cropRect(c.video, { aspect, x: 0.5, y: 0.5 }).sw));
   const w = Math.max(2, Math.round(Math.min(width, widest)));
@@ -226,8 +229,11 @@ export async function sequenceGrabber(clips: Clip[], fps: number, aspect: number
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d')!;
+  const straight = straightThrough(clips, fps, aspect, w, h, order);
 
   const draw = async (i: number) => {
+    const decoded = await straight.take(i);
+    if (decoded) return void ctx.drawImage(decoded, 0, 0, w, h);
     const { clip, source } = frameAt(clips, fps, i);
     let el = els.get(clip.video.url);
     if (!el) {
@@ -250,6 +256,52 @@ export async function sequenceGrabber(clips: Clip[], fps: number, aspect: number
     async dataUrl(i: number): Promise<string> {
       await draw(i);
       return canvas.toDataURL('image/jpeg', 0.8);
+    },
+  };
+}
+
+/** Frames in a planned order, decoded clip by clip; null for a frame that has to be seeked for. */
+function straightThrough(clips: Clip[], fps: number, aspect: number, w: number, h: number, order: number[]) {
+  const plan = order.map((i) => ({ i, ...frameAt(clips, fps, i) }));
+  let at = 0; // next in the plan
+  let run: { end: number; it: AsyncGenerator<WrappedCanvas | null> | null } | null = null;
+  const tracks = new Map<LoadedVideo, Promise<InputVideoTrack | null>>();
+  const trackOf = (video: LoadedVideo) => {
+    let t = tracks.get(video);
+    if (!t) {
+      t = (async () => {
+        const input = new Input({ source: new BlobSource(video.file), formats: ALL_FORMATS });
+        const track = await input.getPrimaryVideoTrack();
+        return track && (await track.canDecode()) ? track : null;
+      })().catch(() => null);
+      tracks.set(video, t);
+    }
+    return t;
+  };
+
+  return {
+    async take(i: number): Promise<CanvasImageSource | null> {
+      if (plan[at]?.i !== i) return null;
+      if (!run || at >= run.end) {
+        // the next stretch of frames from one clip
+        void run?.it?.return(undefined);
+        const { clip } = plan[at];
+        let end = at;
+        while (end < plan.length && plan[end].clip === clip) end++;
+        const track = await trackOf(clip.video);
+        const c = cropRect(clip.video, { aspect, x: clip.cropX, y: clip.cropY });
+        const crop = { left: Math.round(c.sx), top: Math.round(c.sy), width: Math.round(c.sw), height: Math.round(c.sh) };
+        const sink = track && new CanvasSink(track, { width: w, height: h, fit: 'fill', crop });
+        run = { end, it: sink ? sink.canvasesAtTimestamps(plan.slice(at, end).map((p) => p.source)) : null };
+      }
+      at++;
+      if (!run.it) return null;
+      try {
+        return (await run.it.next()).value?.canvas ?? null;
+      } catch {
+        run.it = null; // the decoder gave up: seek for the rest of this clip
+        return null;
+      }
     },
   };
 }

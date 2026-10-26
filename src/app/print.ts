@@ -392,7 +392,7 @@ export function printPanel() {
     if (!missing.length) return;
     await new Promise((r) => setTimeout(r, 200)); // settle while things move
     if (run !== previewRun) return;
-    const grab = await sequenceGrabber(clips(), state.fps, aspect(), 240);
+    const grab = await sequenceGrabber(clips(), state.fps, aspect(), 240, missing);
     for (const i of missing) {
       if (run !== previewRun) return;
       thumbs.set(thumbKey(i), await grab.dataUrl(i));
@@ -462,7 +462,8 @@ export function printPanel() {
     const n = frameCount();
     const id = state.projectId;
     try {
-      const grab = await sequenceGrabber(list, state.fps, aspect(), (s.frameW / 25.4) * 300); // ~300 dpi
+      // ~300 dpi, decoded in the order the sheets ask for them
+      const grab = await sequenceGrabber(list, state.fps, aspect(), (s.frameW / 25.4) * 300, [...Array(n).keys()]);
       const bytes = await buildSheetsPdf({
         spec: s,
         style: state.style,
