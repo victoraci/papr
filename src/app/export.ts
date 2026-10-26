@@ -101,12 +101,16 @@ export async function exportPngZip(job: ExportJob, name: string): Promise<Blob> 
   return new Blob([zipSync(files) as BlobPart], { type: 'application/zip' });
 }
 
+/** Fade at a jump in the sound, so it doesn't click. */
+const JUMP_FADE = 0.004;
+
 /**
  * The original sound of the printed edit: every piece at its place on the
- * timeline, overlaps mixed, cut to `duration` and repeated `times`. Videos
- * without readable sound stay silent for their part.
+ * timeline, overlaps mixed. Then only the sound under `frames` (printed frame
+ * numbers at `fps`, in output order) is kept, and that is repeated `times`.
+ * Videos without readable sound stay silent for their part.
  */
-export async function cutSound(pieces: SoundPiece[], duration: number, times: number): Promise<AudioBuffer> {
+export async function cutSound(pieces: SoundPiece[], fps: number, frames: number[], times: number): Promise<AudioBuffer> {
   const rate = 48000;
   // decoding resamples to the context's rate, so pieces of different videos fit together
   const ctx = new OfflineAudioContext(2, 1, rate);
@@ -115,8 +119,9 @@ export async function cutSound(pieces: SoundPiece[], duration: number, times: nu
     if (!decoded.has(p.file)) decoded.set(p.file, await ctx.decodeAudioData(await p.file.arrayBuffer()).catch(() => null));
   if (![...decoded.values()].some(Boolean)) throw new Error('These videos have no sound this browser can read.');
 
-  const len = Math.max(1, Math.round(duration * rate));
-  const once = [new Float32Array(len), new Float32Array(len)];
+  const edge = (i: number) => Math.round((i * rate) / fps);
+  const len = Math.max(1, edge(Math.max(...frames) + 1));
+  const whole = [new Float32Array(len), new Float32Array(len)];
   // pieces that overlap on the timeline are mixed
   for (const p of pieces) {
     const full = decoded.get(p.file);
@@ -126,11 +131,33 @@ export async function cutSound(pieces: SoundPiece[], duration: number, times: nu
     const n = Math.min(len - at, full.length - from, Number.isFinite(p.length) ? Math.round(p.length * rate) : len);
     for (let c = 0; c < 2; c++) {
       const src = full.getChannelData(Math.min(c, full.numberOfChannels - 1));
-      const dst = once[c];
+      const dst = whole[c];
       for (let i = 0; i < n; i++) dst[at + i] += src[from + i];
     }
   }
-  const out = new AudioBuffer({ length: len * times, numberOfChannels: 2, sampleRate: rate });
-  for (let c = 0; c < 2; c++) for (let t = 0; t < times; t++) out.getChannelData(c).set(once[c], t * len);
+
+  // the sound of each kept frame, one after the other
+  const size = frames.reduce((n, i) => n + edge(i + 1) - edge(i), 0);
+  const once = [new Float32Array(size), new Float32Array(size)];
+  const fade = Math.round(JUMP_FADE * rate);
+  let to = 0;
+  frames.forEach((i, k) => {
+    const from = edge(i);
+    const n = edge(i + 1) - from;
+    const jumpIn = k > 0 && frames[k - 1] !== i - 1;
+    const jumpOut = k < frames.length - 1 && frames[k + 1] !== i + 1;
+    for (let c = 0; c < 2; c++) {
+      const dst = once[c];
+      dst.set(whole[c].subarray(from, from + n), to);
+      for (let j = 0; j < Math.min(fade, n); j++) {
+        if (jumpIn) dst[to + j] *= j / fade;
+        if (jumpOut) dst[to + n - 1 - j] *= j / fade;
+      }
+    }
+    to += n;
+  });
+
+  const out = new AudioBuffer({ length: Math.max(1, size * times), numberOfChannels: 2, sampleRate: rate });
+  for (let c = 0; c < 2; c++) for (let t = 0; t < times; t++) out.getChannelData(c).set(once[c], t * size);
   return out;
 }

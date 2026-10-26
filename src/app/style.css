@@ -850,6 +850,28 @@ input[type='range'].tl-zoom {
   font-size: 15px;
 }
 
+.scan-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.scan-bar > .tl-btn {
+  flex: none;
+  align-self: flex-start;
+  height: 54px;
+  min-width: 40px;
+  margin-top: 3px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.scan-bar .frame-strip {
+  flex: 1;
+  min-width: 0;
+}
+
 .frame-strip {
   display: flex;
   gap: 6px;
@@ -886,8 +908,8 @@ input[type='range'].tl-zoom {
   width: auto;
 }
 
-.thumb.missing {
-  background: repeating-linear-gradient(135deg, var(--surface) 0 6px, var(--surface-2) 6px 12px);
+.thumb.after-gap {
+  margin-left: 14px;
 }
 
 .sheet-list,

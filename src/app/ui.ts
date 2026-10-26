@@ -88,6 +88,38 @@ export function sidebar(body: Child[], foot: Child[]) {
   return el('aside', { class: 'side' }, el('div', { class: 'side-body' }, ...body), el('div', { class: 'side-foot' }, ...foot));
 }
 
+/** Small 16 px icons for the player and editor buttons. */
+export const ICONS = {
+  play: '<path d="M5 3.5v9l7.5-4.5z" fill="currentColor"/>',
+  pause: '<path d="M4.5 3.5h2.5v9H4.5zM9 3.5h2.5v9H9z" fill="currentColor"/>',
+  undo: '<path d="M6 4 3 7l3 3M3.5 7h6a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  redo: '<path d="m10 4 3 3-3 3M12.5 7h-6a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  split:
+    '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="4.5" cy="11.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/><path d="M5.9 10.1 11 2.5M10.1 10.1 5 2.5"/></g>',
+  trash:
+    '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></g>',
+  add: '<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  minus: '<path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  plus: '<path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  fit: '<path d="M2.5 8h11M5 5.5 2.5 8 5 10.5M11 5.5l2.5 2.5-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  sound:
+    '<path d="M2.5 6.5v3M5 4.5v7M7.5 6v4M10.5 3v10M13 5.5v5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
+};
+
+export type IconName = keyof typeof ICONS;
+
+export function setIcon(b: HTMLElement, icon: IconName) {
+  b.querySelector('svg')?.remove();
+  b.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">${ICONS[icon]}</svg>`);
+}
+
+export function iconButton(icon: IconName, title: string, onclick: () => void, label?: string) {
+  const b = el('button', { class: label ? 'tl-btn labelled' : 'tl-btn', title, ariaLabel: title, onclick });
+  setIcon(b, icon);
+  if (label) b.append(el('span', { textContent: label }));
+  return b;
+}
+
 export const hint = (text = '') => el('p', { class: 'hint', textContent: text });
 
 /** On/off row: label left, switch right. The whole row is clickable. */

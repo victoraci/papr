@@ -5,7 +5,7 @@
 import { cutSound, exportGif, exportMp4, exportPngZip, type DrawFrame } from './export.ts';
 import { frameSize, missingPages, processScan, toEntries, type Project, type ScanEntry } from './scans.ts';
 import { printed, type SoundPiece } from './session.ts';
-import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, slider, toggleRow, type Control } from './ui.ts';
+import { dropTarget, el, field, filePicker, group, hint, iconButton, mb, more, options, plural, saveFile, setIcon, sidebar, slider, toggleRow, type Control } from './ui.ts';
 
 const SIZES = { small: 640, medium: 960, large: 1280 } as const;
 type Size = keyof typeof SIZES;
@@ -42,9 +42,11 @@ export function scanPanel() {
     return best;
   };
   const fps = (p: Project) => opts.fps || p.payload.fps;
-  /** Order of frames in the output (before repeats). */
+  /** The frames scanned so far, in printed order. */
+  const scanned = (p: Project) => [...p.frames.keys()].sort((a, b) => a - b);
+  /** Order of frames in the output (before repeats): only what's scanned, so a few sheets already make a short video. */
   const sequence = (p: Project) => {
-    const base = [...Array(p.payload.frameCount).keys()];
+    const base = scanned(p);
     return opts.boomerang && base.length > 2 ? [...base, ...base.slice(1, -1).reverse()] : base;
   };
   const soundAllowed = (p: Project) => fps(p) === p.payload.fps && !opts.boomerang;
@@ -88,27 +90,31 @@ export function scanPanel() {
   }
 
   // --- view: player + frame strip ---
-  const player = el('canvas', { class: 'player', title: 'Click to pause' });
+  const player = el('canvas', { class: 'player', title: 'Play / pause (Space)' });
+  const playBtn = iconButton('pause', 'Play / pause (Space)', () => setPlaying(!playing));
   const strip = el('div', { class: 'frame-strip' });
   const waiting = el('p', { class: 'hint waiting' });
   const playerHolder = el('div', { class: 'picture-holder' }, player, waiting);
-  const view = el('div', { class: 'view scan-view' }, playerHolder, strip);
-  let thumbs: HTMLElement[] = [];
+  const view = el('div', { class: 'view scan-view' }, playerHolder, el('div', { class: 'scan-bar' }, playBtn, strip));
+  /** strip thumb per frame number */
+  let thumbs = new Map<number, HTMLElement>();
 
   function buildStrip(p: Project) {
-    thumbs = [...Array(p.payload.frameCount).keys()].map((i) => {
-      const f = p.frames.get(i);
-      const t = el('button', { class: f ? 'thumb' : 'thumb missing', title: `Frame ${i + 1}`, onclick: () => showFrame(i) });
-      if (f) {
-        const c = el('canvas');
-        c.height = 96;
-        c.width = Math.round((96 * p.inner.w) / p.inner.h);
-        c.getContext('2d')!.drawImage(f, p.inner.x, p.inner.y, p.inner.w, p.inner.h, 0, 0, c.width, c.height);
-        t.append(c);
-      } else t.style.aspectRatio = `${p.inner.w} / ${p.inner.h}`;
-      return t;
-    });
-    strip.replaceChildren(...thumbs);
+    thumbs = new Map();
+    let prev = -1;
+    for (const i of scanned(p)) {
+      const f = p.frames.get(i)!;
+      // a small gap where frames are still missing
+      const t = el('button', { class: prev >= 0 && i !== prev + 1 ? 'thumb after-gap' : 'thumb', title: `Frame ${i + 1}`, onclick: () => showFrame(i) });
+      const c = el('canvas');
+      c.height = 96;
+      c.width = Math.round((96 * p.inner.w) / p.inner.h);
+      c.getContext('2d')!.drawImage(f, p.inner.x, p.inner.y, p.inner.w, p.inner.h, 0, 0, c.width, c.height);
+      t.append(c);
+      thumbs.set(i, t);
+      prev = i;
+    }
+    strip.replaceChildren(...thumbs.values());
   }
 
   // --- controls ---
@@ -296,7 +302,7 @@ export function scanPanel() {
       if (!busy && noteKey !== exportKey(p)) {
         noteKey = '';
         exportNote.className = 'hint';
-        exportNote.textContent = missingPages(p).length ? 'Missing frames repeat the frame before them.' : '';
+        exportNote.textContent = missingPages(p).length ? `Just the frames scanned so far: ${p.frames.size} of ${p.payload.frameCount}.` : '';
       }
     }
     shown = -1;
@@ -305,12 +311,8 @@ export function scanPanel() {
   const drawer = (p: Project, order: number[]): DrawFrame => {
     const s = source(p);
     const t = opts.trim / 100;
-    // a missing frame repeats the one before it
-    const frames: (ImageBitmap | undefined)[] = [];
-    let prev: ImageBitmap | undefined;
-    for (let i = 0; i < p.payload.frameCount; i++) frames.push((prev = p.frames.get(i) ?? prev));
     return (ctx, i, w, h) => {
-      const f = frames[order[i % order.length]];
+      const f = p.frames.get(order[i % order.length]);
       if (!f) {
         ctx.fillStyle = '#1b1b1b';
         ctx.fillRect(0, 0, w, h);
@@ -325,15 +327,27 @@ export function scanPanel() {
   let t0 = performance.now();
   let shown = -1;
   let pos = 0;
-  player.onclick = () => {
-    playing = !playing;
+  function setPlaying(v: boolean) {
+    playing = v;
     const p = current();
     if (playing && p) t0 = performance.now() - (pos / fps(p)) * 1000;
-  };
+    setIcon(playBtn, playing ? 'pause' : 'play');
+  }
+  player.onclick = () => setPlaying(!playing);
+  document.addEventListener('keydown', (e) => {
+    if (page.hidden || work.hidden || e.key !== ' ') return;
+    const t = e.target instanceof HTMLElement ? e.target : null;
+    if (t?.closest('input, textarea, select, [contenteditable]')) return;
+    // buttons next to the player play too; the ones in the sidebar keep Space for themselves
+    if (t?.closest('button') && !view.contains(t)) return;
+    e.preventDefault();
+    t?.blur(); // so the button doesn't click on key up
+    if (!e.repeat) setPlaying(!playing);
+  });
   function showFrame(i: number) {
     const p = current();
     if (!p) return;
-    playing = false;
+    setPlaying(false);
     pos = Math.max(0, sequence(p).indexOf(i));
     shown = -1;
   }
@@ -342,12 +356,13 @@ export function scanPanel() {
     if (p) {
       const order = sequence(p);
       if (playing) pos = Math.floor(((now - t0) / 1000) * fps(p)) % order.length;
+      else pos = Math.min(pos, order.length - 1);
       if (pos !== shown) {
         shown = pos;
         drawer(p, order)(player.getContext('2d')! as unknown as OffscreenCanvasRenderingContext2D, pos, player.width, player.height);
         const src = order[pos];
         thumbs.forEach((t, k) => t.classList.toggle('on', k === src));
-        if (!playing) thumbs[src]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        if (!playing) thumbs.get(src)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       }
     }
     requestAnimationFrame(tick);
@@ -371,7 +386,7 @@ export function scanPanel() {
       let audio: AudioBuffer | undefined;
       if (withSound(p)) {
         download.textContent = 'Reading the sound…';
-        audio = await cutSound(opts.soundPieces!, p.payload.frameCount / p.payload.fps, repeat);
+        audio = await cutSound(opts.soundPieces!, p.payload.fps, order, repeat);
       }
       const job = {
         frames: order.length * repeat,
