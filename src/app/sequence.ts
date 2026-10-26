@@ -1,6 +1,8 @@
-// The edit: video clips back to back on one track. Cutting, trimming,
-// moving and deleting only change this list; the video files stay as they
-// are. The printed frames are sampled from it at the print frame rate.
+// The edit: video clips back to back on one track, and sound clips that
+// were separated from them, each at its own place on the timeline. Cutting,
+// trimming, moving and deleting only change these lists; the video files
+// stay as they are. The printed frames are sampled from the clips at the
+// print frame rate.
 
 import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input } from 'mediabunny';
 import type { FrameImage } from '../core/pdf.ts';
@@ -15,12 +17,32 @@ export interface Clip {
   /** where the crop sits in this clip (0 = left/top, 1 = right/bottom) */
   cropX: number;
   cropY: number;
+  /** its own sound is off (separated, or not wanted) */
+  muted: boolean;
 }
+
+/** Sound of a video, on its own: placed anywhere on the timeline. */
+export interface Sound {
+  id: number;
+  video: LoadedVideo;
+  /** used part of the video's sound, s */
+  from: number;
+  to: number;
+  /** where it starts on the timeline, s */
+  at: number;
+}
+
+export interface Edit {
+  clips: Clip[];
+  sounds: Sound[];
+}
+
+export const emptyEdit = (): Edit => ({ clips: [], sounds: [] });
 
 let nextId = 1;
 
 export function newClip(video: LoadedVideo): Clip {
-  return { id: nextId++, video, from: 0, to: video.duration, cropX: 0.5, cropY: 0.5 };
+  return { id: nextId++, video, from: 0, to: video.duration, cropX: 0.5, cropY: 0.5, muted: false };
 }
 
 export const clipLength = (c: Clip) => c.to - c.from;
@@ -113,22 +135,57 @@ export function setCrop(clips: Clip[], id: number, x: number, y: number): Clip[]
   return clips.map((c) => (c.id === id ? { ...c, cropX: x, cropY: y } : c));
 }
 
-/** Undo / redo over whole clip lists. */
-export function history(initial: Clip[] = []) {
-  const past: Clip[][] = [];
-  const future: Clip[][] = [];
+// --- sound ---
+
+export const soundLength = (s: Sound) => s.to - s.from;
+
+/** Takes the sound out of a clip: the clip goes quiet, the sound becomes a clip of its own right below. */
+export function separate(edit: Edit, id: number): Edit | null {
+  const i = edit.clips.findIndex((c) => c.id === id);
+  const clip = edit.clips[i];
+  if (!clip || clip.muted) return null;
+  const sound: Sound = { id: nextId++, video: clip.video, from: clip.from, to: clip.to, at: starts(edit.clips)[i] };
+  return {
+    clips: edit.clips.map((c) => (c.id === id ? { ...c, muted: true } : c)),
+    sounds: [...edit.sounds, sound],
+  };
+}
+
+/** Cuts a sound in two at timeline time t; both parts keep at least minLength. */
+export function splitSound(sounds: Sound[], id: number, t: number, minLength: number): Sound[] | null {
+  const s = sounds.find((k) => k.id === id);
+  if (!s) return null;
+  const cut = s.from + (t - s.at);
+  if (cut - s.from < minLength || s.to - cut < minLength) return null;
+  const right: Sound = { ...s, id: nextId++, from: cut, at: t };
+  return sounds.flatMap((k) => (k.id === id ? [{ ...k, to: cut }, right] : [k]));
+}
+
+/** Everything that sounds, as pieces on the timeline: the clips' own sound and the separated sounds. */
+export function soundPieces(edit: Edit): { video: LoadedVideo; from: number; to: number; at: number }[] {
+  const at = starts(edit.clips);
+  return [
+    ...edit.clips.flatMap((c, i) => (c.muted ? [] : [{ video: c.video, from: c.from, to: c.to, at: at[i] }])),
+    ...edit.sounds.map((s) => ({ video: s.video, from: s.from, to: s.to, at: s.at })),
+  ];
+}
+
+/** Undo / redo over whole edits. */
+export function history(initial: Edit = emptyEdit()) {
+  const past: Edit[] = [];
+  const future: Edit[] = [];
   let now = initial;
   return {
     get: () => now,
     /** a new step that undo can go back from */
-    push(next: Clip[]) {
+    push(next: Edit) {
       past.push(now);
       if (past.length > 200) past.shift();
       future.length = 0;
       now = next;
     },
     /** change the current step in place (crop moves, a drag still going on) */
-    replace(next: Clip[]) {
+    replace(next: Edit) {
       now = next;
     },
     undo() {
@@ -147,7 +204,7 @@ export function history(initial: Clip[] = []) {
     },
     canUndo: () => past.length > 0,
     canRedo: () => future.length > 0,
-    reset(next: Clip[]) {
+    reset(next: Edit) {
       past.length = 0;
       future.length = 0;
       now = next;

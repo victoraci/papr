@@ -1,10 +1,13 @@
 // The edit at the print frame rate, i.e. exactly the frames that end up on
 // paper, with the crop of the clip on screen on top: drag the picture to move
-// that crop, click it to play or pause. Playing runs the videos themselves,
-// sound included, and the picture only changes when the next printed frame is
-// due. Standing still seeks to the exact printed frame.
+// that crop, click it to play or pause. Playing runs the videos themselves
+// (silent) and the picture only changes when the next printed frame is due.
+// The sound is mixed apart from the picture, the clips' own sound and the
+// separated sounds each at their place, and its clock sets the pace.
+// Standing still seeks to the exact printed frame.
 
-import { frameAt, frameCount, starts, type Clip } from './sequence.ts';
+import { clipAt, duration, frameAt, frameCount, soundPieces, starts, type Clip, type Edit } from './sequence.ts';
+import { onSound, soundOf } from './sound.ts';
 import { el } from './ui.ts';
 import { cropRect, seek, videoElement } from './video.ts';
 
@@ -16,11 +19,13 @@ const JOIN = 0.05; // s
 const NUDGE = 0.001;
 /** the next clip's player gets ready this long before the cut; earlier would cost the one playing frames */
 const PREP = 2.5; // s
-/** a paused video takes a moment to get going, so the next clip starts (silent) this much before the cut */
+/** a paused video takes a moment to get going, so the next clip starts this much before the cut */
 const LEAD = 0.08; // s
+/** a video closer than this to the clock is caught up by playing it a little faster or slower; further off, a player is put there */
+const NEAR = 0.3; // s
 
 export interface ViewHost {
-  clips(): Clip[];
+  edit(): Edit;
   fps(): number;
   aspect(): number;
   /** the crop of a clip was dragged; done when the pointer is released */
@@ -58,9 +63,10 @@ export function videoView(host: ViewHost) {
   let after: { clip: Clip; ready: Promise<HTMLVideoElement>; el?: HTMLVideoElement; early?: boolean } | null = null;
   let switching = false;
 
-  const count = () => frameCount(host.clips(), host.fps());
+  const clips = () => host.edit().clips;
+  const count = () => frameCount(clips(), host.fps());
   const keyOf = (i: number) => {
-    const { clip, source } = frameAt(host.clips(), host.fps(), i);
+    const { clip, source } = frameAt(clips(), host.fps(), i);
     return { clip, source, key: `${clip.video.url}|${source.toFixed(3)}` };
   };
 
@@ -163,19 +169,41 @@ export function videoView(host: ViewHost) {
     }
   }
 
-  // --- playing ---
+  // --- the clock and the sound ---
 
-  async function go(v: HTMLVideoElement, my: number) {
-    v.muted = false;
-    try {
-      await v.play();
-    } catch (e) {
-      // no sound allowed yet (no click on the page): play it silent
-      if (my !== run || (e as DOMException).name !== 'NotAllowedError') return;
-      v.muted = true;
-      await v.play().catch(() => {});
+  let audio: AudioContext | null = null;
+  let withSound = false; // the sound card's clock, else the system's
+  let voices: AudioBufferSourceNode[] = [];
+  let t0 = 0; // timeline time at clock time c0
+  let c0 = 0;
+  const clock = () => (withSound ? audio!.currentTime : performance.now() / 1000);
+  /** timeline time being heard right now */
+  const now = () => t0 + Math.max(0, clock() - c0 - (withSound ? audio!.outputLatency || audio!.baseLatency || 0 : 0));
+
+  /** Starts the clock (and the sound) at timeline time t. */
+  function startAt(t: number) {
+    for (const v of voices) v.stop();
+    voices = [];
+    t0 = t;
+    c0 = clock() + (withSound ? 0.04 : 0); // a little room to start the sound on time
+    if (!withSound) return;
+    const end = duration(clips());
+    for (const p of soundPieces(host.edit())) {
+      const sound = soundOf(p.video);
+      const late = Math.max(0, t - p.at); // part already past
+      const length = Math.min(p.to - p.from, end - p.at) - late;
+      if (!sound || length <= 0) continue;
+      const v = audio!.createBufferSource();
+      v.buffer = sound.buffer;
+      v.connect(audio!.destination);
+      v.start(c0 + Math.max(0, p.at - t), p.from + late, length);
+      voices.push(v);
     }
   }
+  // a sound read while playing joins in
+  onSound(() => playing && c0 && startAt(now()));
+
+  // --- playing ---
 
   /** The next clip that needs a player of its own; clips that carry on in the same video are played through. */
   function following(list: Clip[], clip: Clip): Clip | null {
@@ -192,7 +220,7 @@ export function videoView(host: ViewHost) {
   /** Gets the next clip's player to its first frame early, so the switch has no gap. */
   function prepare() {
     if (!active) return;
-    const next = following(host.clips(), active.clip);
+    const next = following(clips(), active.clip);
     if (after && next && after.clip.id === next.id && after.clip.from === next.from && after.clip.video === next.video) return;
     dropAfter();
     if (!next) return;
@@ -200,7 +228,6 @@ export function videoView(host: ViewHost) {
     const waiting: NonNullable<typeof after> = { clip: next, ready: player(next.video.url, busy) };
     waiting.ready = waiting.ready.then(async (v) => {
       v.pause();
-      v.muted = true;
       if (Math.abs(v.currentTime - (next.from + NUDGE)) > 0.01) await seek(v, next.from + NUDGE);
       waiting.el = v;
       return v;
@@ -213,6 +240,44 @@ export function videoView(host: ViewHost) {
     after = null;
   }
 
+  /** Puts the player for `clip` on screen, the waiting one if it's this clip. */
+  function switchTo(clip: Clip, source: number) {
+    const old = active;
+    const my = run;
+    const ready =
+      after && after.clip.id === clip.id && after.clip.from === clip.from
+        ? after.ready
+        : (dropAfter(), player(clip.video.url, old?.el).then(async (v) => (await seek(v, source), v)));
+    after = null;
+    switching = true;
+    void ready.then((v) => {
+      if (my !== run) return;
+      switching = false;
+      if (old && old.el !== v) {
+        old.el.pause();
+        old.el.playbackRate = 1;
+      }
+      active = { clip, el: v };
+      if (v.paused) void v.play().catch(() => {});
+    });
+  }
+
+  /** Keeps a playing video on the clock. */
+  function steer(v: HTMLVideoElement, source: number) {
+    if (v.seeking) return;
+    const off = source - v.currentTime;
+    const rate = Math.abs(off) < 0.02 ? 1 : Math.min(1.25, Math.max(0.8, 1 + off * 2));
+    if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate;
+    if (v.paused) void v.play().catch(() => {});
+  }
+
+  /** Resolves once the video shows a new frame (or after a short while). */
+  const moving = (v: HTMLVideoElement) =>
+    new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 400);
+      if ('requestVideoFrameCallback' in v) v.requestVideoFrameCallback(() => (clearTimeout(t), resolve()));
+    });
+
   async function play() {
     const n = count();
     if (!n || playing) return;
@@ -220,39 +285,21 @@ export function videoView(host: ViewHost) {
     playing = true;
     const my = ++run;
     host.onPlay();
-    const { clip, source } = frameAt(host.clips(), host.fps(), k);
+    // the sound needs this click to be allowed to start
+    audio ??= new AudioContext();
+    const resumed = audio.resume().catch(() => {});
+    const { clip, source } = frameAt(clips(), host.fps(), k);
     const v = active?.clip.video.url === clip.video.url ? active.el : await player(clip.video.url);
     if (Math.abs(v.currentTime - source) > 1 / host.fps()) await seek(v, source);
     if (my !== run) return;
     active = { clip, el: v };
-    await go(v, my);
-  }
-
-  /** The clip on screen ran out: on to the next one, or back to the start. */
-  async function advance() {
-    const my = run;
-    const list = host.clips();
-    const cur = active!;
-    const i = list.findIndex((c) => c.id === cur.clip.id);
-    const next = list[(i + 1) % list.length];
-    if (carriesOn(list[i], next)) {
-      active = { clip: next, el: cur.el };
-      return;
-    }
-    switching = true;
-    try {
-      cur.el.pause();
-      const ready = after && after.clip.id === next.id && after.clip.from === next.from ? after.ready : null;
-      if (!ready) dropAfter();
-      const v = ready ? await ready : await player(next.video.url, cur.el).then(async (v) => (await seek(v, next.from + NUDGE), v));
-      if (my !== run) return;
-      cur.el.muted = true;
-      active = { clip: next, el: v };
-      after = null;
-      await go(v, my);
-    } finally {
-      switching = false;
-    }
+    void v.play().catch(() => {});
+    // picture and sound start together, once the video is really going
+    await Promise.all([moving(v), resumed]);
+    if (my !== run) return;
+    withSound = audio.state === 'running';
+    const start = starts(clips())[clips().findIndex((c) => c.id === clip.id)] ?? 0;
+    startAt(start + Math.max(0, v.currentTime - clip.from));
   }
 
   function tick() {
@@ -264,28 +311,43 @@ export function videoView(host: ViewHost) {
     }
     // hidden (other step or page): no sound from nowhere
     if (playing && !holder.getClientRects().length) pause();
-    if (playing && n && active && !switching && !active.el.seeking && (!active.el.paused || active.el.ended)) {
-      const list = host.clips();
-      const i = list.findIndex((c) => c.id === active!.clip.id);
-      if (i >= 0) {
-        const clip = (active.clip = list[i]); // same clip, maybe a new crop
-        const t = active.el.currentTime;
-        if (t >= clip.to - 0.002 || active.el.ended) void advance();
-        else {
-          if (!after && clip.to - t < PREP) prepare();
-          if (after?.el && !after.early && clip.to - t < LEAD && !carriesOn(clip, list[(i + 1) % list.length])) {
-            after.early = true;
-            void after.el.play().catch(() => {});
-          }
-          const at = starts(list)[i] + Math.max(0, t - clip.from);
-          const kk = Math.min(n - 1, Math.floor(at * host.fps() + 1e-6));
-          const { key } = keyOf(kk);
-          if (key !== shown) {
-            k = kk;
-            paint(active.el, clip, key);
-            host.onTime(k / host.fps());
-          }
+    if (playing && n && active && c0) {
+      const list = clips();
+      const end = duration(list);
+      let t = now();
+      if (t >= end) {
+        // back to the start
+        startAt(0);
+        t = 0;
+      }
+      const hit = clipAt(list, t)!;
+      const { clip, start } = hit;
+      const source = Math.min(clip.from + (t - start), clip.to);
+      // the player on screen holds this spot of the video: keep it on the clock, else switch
+      const v = active.el;
+      if (active.clip.video.url === clip.video.url && Math.abs(v.currentTime - source) < NEAR) {
+        active.clip = clip;
+        steer(v, source);
+      } else if (!switching) switchTo(clip, source);
+
+      // the next clip: get it ready, then going just before the cut
+      const left = start + clip.to - clip.from - t;
+      if (!after && !switching && left < PREP) prepare();
+      if (after?.el && !after.early) {
+        const i = list.findIndex((c) => c.id === after!.clip.id);
+        const cut = i >= 0 && starts(list)[i] > t ? starts(list)[i] : end;
+        if (cut - t < LEAD) {
+          after.early = true;
+          void after.el.play().catch(() => {});
         }
+      }
+
+      const kk = Math.min(n - 1, Math.floor(t * host.fps() + 1e-6));
+      const { key } = keyOf(kk);
+      if (active.clip.id === clip.id && !v.seeking && key !== shown) {
+        k = kk;
+        paint(v, clip, key);
+        host.onTime(k / host.fps());
       }
     }
     requestAnimationFrame(tick);
@@ -333,7 +395,14 @@ export function videoView(host: ViewHost) {
     if (!playing) return;
     playing = false;
     run++;
-    active?.el.pause();
+    c0 = 0;
+    switching = false;
+    for (const v of voices) v.stop();
+    voices = [];
+    if (active) {
+      active.el.pause();
+      active.el.playbackRate = 1;
+    }
     dropAfter();
     host.onPlay();
     void still();
@@ -345,28 +414,14 @@ export function videoView(host: ViewHost) {
 
   return {
     el: holder,
-    /** the edit changed: keep playing where possible, else redraw what's under the playhead */
+    /** the edit changed: the sound follows right away, the picture on the next frame */
     refresh() {
       const n = count();
       if (n) k = Math.min(k, n - 1);
-      if (playing && active) {
-        // carry on with the clip that holds the playing spot of the video, now
-        const list = host.clips();
-        const { el: v, clip: was } = active;
-        const t = v.currentTime;
-        const at = starts(list);
-        const here = list
-          .map((c, i) => ({ c, d: Math.abs(at[i] + t - c.from - k / host.fps()) }))
-          .filter(({ c }) => c.video.url === was.video.url && c.from - JOIN <= t && t < c.to)
-          .sort((a, b) => Number(b.c.id === was.id) - Number(a.c.id === was.id) || a.d - b.d);
-        if (here.length) {
-          active = { clip: here[0].c, el: v };
-          dropAfter();
-        } else {
-          pause();
-          void play();
-        }
-      } else void still();
+      if (playing && c0) {
+        dropAfter();
+        startAt(now());
+      } else if (!playing) void still();
       syncCrop();
     },
     seek(t: number) {

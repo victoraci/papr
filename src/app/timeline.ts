@@ -1,21 +1,38 @@
 // Edit timeline: the clips back to back on one track, like a small video
 // editor. Click or drag in the ruler to move the playhead, click a clip to
 // select it, drag it to move it, drag its edges to trim, cut at the
-// playhead, delete, undo. No effects, on purpose.
+// playhead, delete, undo. A clip's sound can be separated: it then sits on
+// a sound track below, free to move, trim, cut and delete on its own. No
+// effects, on purpose.
 //
 // Ruler, clips and playhead are drawn on one canvas the size of the visible
 // part; a wide empty element behind it gives the native scrollbar.
 
-import { clipAt, clipLength, duration, split as splitClips, starts, thumbAt, thumbsOf, type Clip } from './sequence.ts';
+import {
+  clipAt,
+  clipLength,
+  duration,
+  separate,
+  soundLength,
+  split as splitClips,
+  splitSound,
+  starts,
+  thumbAt,
+  thumbsOf,
+  type Clip,
+  type Edit,
+  type Sound,
+} from './sequence.ts';
+import { onSound, soundOf } from './sound.ts';
 import { el } from './ui.ts';
 
 export interface TimelineHost {
-  clips(): Clip[];
+  edit(): Edit;
   fps(): number;
   /** a finished edit, one undo step */
-  commit(next: Clip[]): void;
+  commit(next: Edit): void;
   /** live while dragging; commit or cancel follows */
-  preview(next: Clip[] | null): void;
+  preview(next: Edit | null): void;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -32,7 +49,10 @@ export interface TimelineHost {
 const RULER = 26;
 const TRACK_Y = 36;
 const TRACK_H = 64;
-const HEIGHT = TRACK_Y + TRACK_H + 12;
+const WAVE_H = 16; // the clip's own sound, along its bottom
+const SOUND_Y = TRACK_Y + TRACK_H + 12; // first sound track
+const LANE_H = 34;
+const LANE_GAP = 4;
 const PAD_L = 14;
 const PAD_R = 120;
 const ADD = 64; // the "+" tile after the last clip
@@ -52,6 +72,8 @@ const ICONS = {
   minus: '<path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   plus: '<path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   fit: '<path d="M2.5 8h11M5 5.5 2.5 8 5 10.5M11 5.5l2.5 2.5-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  sound:
+    '<path d="M2.5 6.5v3M5 4.5v7M7.5 6v4M10.5 3v10M13 5.5v5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
 };
 
 function iconButton(icon: keyof typeof ICONS, title: string, onclick: () => void, label?: string) {
@@ -65,7 +87,22 @@ type Drag =
   | { kind: 'scrub' }
   | { kind: 'press'; id: number; x0: number; t: number }
   | { kind: 'move'; id: number; grab: number; x: number; index: number }
-  | { kind: 'trim'; id: number; side: 'from' | 'to'; x0: number; base: Clip[]; start: number; shift: number };
+  | { kind: 'trim'; id: number; side: 'from' | 'to'; x0: number; base: Clip[]; start: number; shift: number }
+  | { kind: 'sound'; id: number; x0: number; t: number; base: Sound[]; moved: boolean }
+  | { kind: 'soundTrim'; id: number; side: 'from' | 'to'; x0: number; base: Sound[] };
+
+/** Sound tracks: each sound on the first track where it fits without overlapping. */
+function lanesOf(sounds: Sound[]): { lane: Map<number, number>; count: number } {
+  const lane = new Map<number, number>();
+  const ends: number[] = [];
+  for (const s of [...sounds].sort((a, b) => a.at - b.at)) {
+    let i = ends.findIndex((e) => e <= s.at + 1e-6);
+    if (i < 0) i = ends.push(0) - 1;
+    ends[i] = s.at + soundLength(s);
+    lane.set(s.id, i);
+  }
+  return { lane, count: ends.length };
+}
 
 export function timeline(host: TimelineHost) {
   const canvas = el('canvas', { class: 'tl-canvas' });
@@ -80,6 +117,7 @@ export function timeline(host: TimelineHost) {
   const redoBtn = iconButton('redo', 'Redo (⇧⌘Z)', () => host.redo());
   const splitBtn = iconButton('split', 'Cut at the playhead (S)', () => split(), 'Cut');
   const deleteBtn = iconButton('trash', 'Delete the selected clip (⌫)', () => deleteSelected(), 'Delete');
+  const separateBtn = iconButton('sound', 'Separate the sound from the picture', () => separateSelected(), 'Separate sound');
   const addBtn = iconButton('add', 'Add videos', () => host.pickVideos(), 'Add video');
   const zoom = el('input', { type: 'range', min: '0', max: '1000', value: '0', className: 'tl-zoom', title: 'Zoom (⌘ + scroll)' });
   const zoomOut = iconButton('minus', 'Zoom out', () => zoomBy(1 / 1.6));
@@ -89,7 +127,7 @@ export function timeline(host: TimelineHost) {
     'div',
     { class: 'tl-bar' },
     el('div', { class: 'tl-group' }, playBtn, timecode),
-    el('div', { class: 'tl-group tl-tools' }, undoBtn, redoBtn, el('span', { class: 'tl-sep' }), splitBtn, deleteBtn, el('span', { class: 'tl-sep' }), addBtn),
+    el('div', { class: 'tl-group tl-tools' }, undoBtn, redoBtn, el('span', { class: 'tl-sep' }), splitBtn, deleteBtn, separateBtn, el('span', { class: 'tl-sep' }), addBtn),
     el('div', { class: 'tl-group tl-zooms' }, zoomOut, zoom, zoomIn, fitBtn),
   );
   const root = el('div', { class: 'tl' }, bar, scroller);
@@ -102,10 +140,21 @@ export function timeline(host: TimelineHost) {
   let viewW = 0;
   let frame = 0;
 
-  const clips = () => host.clips();
+  const clips = () => host.edit().clips;
+  const sounds = () => host.edit().sounds;
+  const withClips = (list: Clip[]): Edit => ({ ...host.edit(), clips: list });
+  const withSounds = (list: Sound[]): Edit => ({ ...host.edit(), sounds: list });
   const total = () => duration(clips());
+  /** the picture, or further if a sound reaches past it */
+  const extent = () => Math.max(total(), ...sounds().map((s) => s.at + soundLength(s)));
   const minLen = () => 1 / host.fps();
-  const fitPps = () => Math.max(1, (viewW - PAD_L - PAD_R) / Math.max(total(), 0.5));
+  const fitPps = () => Math.max(1, (viewW - PAD_L - PAD_R) / Math.max(extent(), 0.5));
+  const lanes = () => lanesOf(sounds());
+  const laneY = (i: number) => SOUND_Y + i * (LANE_H + LANE_GAP);
+  const height = () => {
+    const n = lanes().count;
+    return n ? laneY(n) + 8 : TRACK_Y + TRACK_H + 12;
+  };
   const maxPps = () => Math.max(fitPps() * 1.01, host.fps() * 56);
   const xOf = (t: number) => PAD_L + t * pps - scroller.scrollLeft;
   const tOf = (x: number) => (x + scroller.scrollLeft - PAD_L) / pps;
@@ -148,7 +197,7 @@ export function timeline(host: TimelineHost) {
     setPps(Math.exp(lo + (Number(zoom.value) / 1000) * (hi - lo)), ph >= 0 && ph <= viewW ? ph : viewW / 2);
   };
   function layoutWidth() {
-    spacer.style.width = `${PAD_L + total() * pps + ADD + PAD_R}px`;
+    spacer.style.width = `${PAD_L + Math.max(total() * pps + ADD, extent() * pps) + PAD_R}px`;
   }
 
   // --- layout while dragging ---
@@ -189,14 +238,15 @@ export function timeline(host: TimelineHost) {
   function render() {
     const dpr = window.devicePixelRatio || 1;
     const w = viewW;
-    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(HEIGHT * dpr)) {
+    const h = height();
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
       canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(HEIGHT * dpr);
+      canvas.height = Math.round(h * dpr);
       canvas.style.width = `${w}px`;
-      canvas.style.height = `${HEIGHT}px`;
+      canvas.style.height = `${h}px`;
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, HEIGHT);
+    ctx.clearRect(0, 0, w, h);
     drawRuler(w);
 
     // track bed
@@ -225,7 +275,78 @@ export function timeline(host: TimelineHost) {
       const s = starts(all);
       marker(xOf(dropAt < all.length ? s[dropAt] : end));
     }
-    drawPlayhead();
+    const { lane, count } = lanes();
+    for (let i = 0; i < count; i++) {
+      ctx.fillStyle = '#121212';
+      ctx.fillRect(0, laneY(i) - 2, w, LANE_H + 4);
+    }
+    for (const s of sounds()) drawSound(s, laneY(lane.get(s.id)!));
+    // sound past the end of the picture doesn't make it into the video
+    const past = Math.max(0, xOf(end));
+    if (count && past < w) {
+      ctx.fillStyle = 'rgba(13,13,13,0.6)';
+      ctx.fillRect(past, SOUND_Y - 2, w - past, laneY(count) - SOUND_Y);
+    }
+    drawPlayhead(h);
+  }
+
+  /** Loudness over time as bars, from x for w px; `t` maps a px offset to a time in the video. */
+  function drawWave(clip: { video: Clip['video'] }, x: number, w: number, y: number, h: number, t: (px: number) => number, mirrored: boolean) {
+    const sound = soundOf(clip.video);
+    if (!sound) return;
+    const { peaks, peakRate } = sound;
+    const a = Math.max(0, Math.floor(-x));
+    const b = Math.min(w, Math.ceil(viewW - x));
+    ctx.beginPath();
+    for (let px = a; px < b; px += 2) {
+      const i0 = Math.floor(t(px) * peakRate);
+      const i1 = Math.max(i0 + 1, Math.floor(t(px + 2) * peakRate));
+      let m = 0;
+      for (let i = Math.max(0, i0); i < Math.min(peaks.length, i1); i++) m = Math.max(m, peaks[i]);
+      const v = Math.max(1, Math.sqrt(m) * h);
+      if (mirrored) ctx.rect(x + px, y + (h - v) / 2, 1.2, v);
+      else ctx.rect(x + px, y + h - v, 1.2, v);
+    }
+    ctx.fill();
+  }
+
+  function drawSound(s: Sound, y: number) {
+    const x = xOf(s.at);
+    const w = Math.max(2, soundLength(s) * pps);
+    if (x > viewW + 4 || x + w < -4) return;
+    const isSel = s.id === selected;
+    ctx.save();
+    roundRect(x, y, w, LANE_H, 5);
+    ctx.fillStyle = '#1c1c1c';
+    ctx.fill();
+    ctx.clip();
+    ctx.fillStyle = '#9a9a9a';
+    drawWave(s, x, w, y + 4, LANE_H - 8, (px) => s.from + px / pps, true);
+    const label = `${s.video.file.name}  ${fmtLength(soundLength(s))}`;
+    ctx.font = '500 10px "Inter Variable", Inter, Arial, sans-serif';
+    ctx.textBaseline = 'middle';
+    const lw = Math.min(w - 10, ctx.measureText(label).width + 10);
+    if (lw > 24) {
+      ctx.fillStyle = 'rgba(13,13,13,0.72)';
+      roundRect(x + 4, y + 4, lw, 15, 3);
+      ctx.fill();
+      ctx.fillStyle = '#f5f5f5';
+      ctx.fillText(label, x + 9, y + 11.5, lw - 10);
+    }
+    ctx.restore();
+    ctx.save();
+    roundRect(x + 0.5, y + 0.5, w - 1, LANE_H - 1, 5);
+    ctx.lineWidth = isSel ? 2 : 1;
+    ctx.strokeStyle = isSel ? '#f5f5f5' : 'rgba(255,255,255,0.12)';
+    ctx.stroke();
+    if (isSel && w > 22) {
+      for (const hx of [x, x + w - 7]) {
+        ctx.fillStyle = '#f5f5f5';
+        roundRect(hx, y, 7, LANE_H, hx === x ? [5, 0, 0, 5] : [0, 5, 5, 0]);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
   }
 
   function drawRuler(w: number) {
@@ -282,6 +403,14 @@ export function timeline(host: TimelineHost) {
     for (let k = first; k < last; k++) {
       const img = thumbAt(thumbs, clip.from + ((k + 0.5) * tw) / pps);
       if (img) ctx.drawImage(img, x + k * tw, lifted ? y - 4 : y, tw, th);
+    }
+    // its own sound along the bottom, while it's still attached
+    if (!clip.muted && soundOf(clip.video)) {
+      const by = (lifted ? y - 4 : y) + TRACK_H - WAVE_H;
+      ctx.fillStyle = 'rgba(13,13,13,0.62)';
+      ctx.fillRect(x, by, w, WAVE_H);
+      ctx.fillStyle = 'rgba(245,245,245,0.8)';
+      drawWave(clip, x, w, by + 2, WAVE_H - 3, (px) => clip.from + px / pps, false);
     }
     // label
     const label = `${clip.video.file.name}  ${fmtLength(clipLength(clip))}`;
@@ -342,11 +471,11 @@ export function timeline(host: TimelineHost) {
     ctx.fillRect(Math.round(x) - 1, TRACK_Y - 6, 2, TRACK_H + 12);
   }
 
-  function drawPlayhead() {
+  function drawPlayhead(h: number) {
     const x = Math.round(xOf(host.time())) + 0.5;
     if (x < -10 || x > viewW + 10) return;
     ctx.fillStyle = '#f5f5f5';
-    ctx.fillRect(x - 0.5, 4, 1, HEIGHT - 8);
+    ctx.fillRect(x - 0.5, 4, 1, h - 8);
     // head on the ruler
     ctx.beginPath();
     ctx.moveTo(x - 6, 3);
@@ -364,9 +493,27 @@ export function timeline(host: TimelineHost) {
   }
 
   // --- hit testing ---
-  type Hit = { kind: 'ruler' } | { kind: 'add' } | { kind: 'clip'; clip: Clip; start: number; edge: 'from' | 'to' | null } | { kind: 'empty' };
+  type Hit =
+    | { kind: 'ruler' }
+    | { kind: 'add' }
+    | { kind: 'clip'; clip: Clip; start: number; edge: 'from' | 'to' | null }
+    | { kind: 'sound'; sound: Sound; edge: 'from' | 'to' | null }
+    | { kind: 'empty' };
   function hit(x: number, y: number): Hit {
     if (y < RULER + 4) return { kind: 'ruler' };
+    if (y >= SOUND_Y - 2) {
+      const { lane } = lanes();
+      for (const s of sounds()) {
+        const ly = laneY(lane.get(s.id)!);
+        if (y < ly - 2 || y > ly + LANE_H + 2) continue;
+        const x0 = xOf(s.at);
+        const x1 = xOf(s.at + soundLength(s));
+        if (x < x0 - EDGE / 2 || x > x1 + EDGE / 2) continue;
+        const zone = Math.min(EDGE, (x1 - x0) / 3);
+        return { kind: 'sound', sound: s, edge: x <= x0 + zone ? 'from' : x >= x1 - zone ? 'to' : null };
+      }
+      return { kind: 'empty' };
+    }
     const end = total();
     const ax = xOf(end) + 6;
     if (x >= ax && x <= ax + ADD && y >= TRACK_Y && y <= TRACK_Y + TRACK_H) return { kind: 'add' };
@@ -402,7 +549,7 @@ export function timeline(host: TimelineHost) {
     if (!drag) {
       const h = hit(x, y);
       canvas.style.cursor =
-        h.kind === 'clip' ? (h.edge ? 'ew-resize' : 'grab') : h.kind === 'add' || h.kind === 'ruler' ? 'pointer' : 'default';
+        h.kind === 'clip' || h.kind === 'sound' ? (h.edge ? 'ew-resize' : 'grab') : h.kind === 'add' || h.kind === 'ruler' ? 'pointer' : 'default';
       return;
     }
     autoscroll(x);
@@ -424,6 +571,8 @@ export function timeline(host: TimelineHost) {
       drag.x = x;
       drag.index = slotAt(rest, tOf(x - drag.grab) + clipLength(c) / 2);
     } else if (drag.kind === 'trim') trimTo(x);
+    else if (drag.kind === 'sound') moveSoundTo(x);
+    else if (drag.kind === 'soundTrim') trimSoundTo(x);
     schedule();
   };
 
@@ -453,6 +602,13 @@ export function timeline(host: TimelineHost) {
       } else drag = { kind: 'press', id: h.clip.id, x0: x, t: clampT(tOf(x)) };
       sync();
     }
+    if (h.kind === 'sound') {
+      selected = h.sound.id;
+      drag = h.edge
+        ? { kind: 'soundTrim', id: h.sound.id, side: h.edge, x0: x, base: sounds() }
+        : { kind: 'sound', id: h.sound.id, x0: x, t: clampT(tOf(x)), base: sounds(), moved: false };
+      sync();
+    }
   };
 
   canvas.onpointerup = () => {
@@ -465,19 +621,24 @@ export function timeline(host: TimelineHost) {
       const rest = list.filter((c) => c.id !== d.id);
       const at = d.index;
       const from = list.findIndex((c) => c.id === d.id);
-      if (at !== from) host.commit([...rest.slice(0, at), list[from], ...rest.slice(at)]);
+      if (at !== from) host.commit(withClips([...rest.slice(0, at), list[from], ...rest.slice(at)]));
     } else if (d.kind === 'trim') {
       const next = clips();
       host.preview(null);
-      if (next !== d.base) host.commit(next);
+      if (next !== d.base) host.commit(withClips(next));
       // keep the playhead on the same picture where possible
       host.seek(clampT(host.time()));
+    } else if (d.kind === 'sound' || d.kind === 'soundTrim') {
+      const next = sounds();
+      host.preview(null);
+      if (next !== d.base) host.commit(withSounds(next));
+      else if (d.kind === 'sound') host.seek(d.t);
     }
     canvas.style.cursor = 'default';
     schedule();
   };
   canvas.onpointercancel = () => {
-    if (drag?.kind === 'trim') host.preview(null);
+    if (drag?.kind === 'trim' || drag?.kind === 'sound' || drag?.kind === 'soundTrim') host.preview(null);
     drag = null;
     schedule();
   };
@@ -493,18 +654,81 @@ export function timeline(host: TimelineHost) {
       if (Math.abs((d.start + dt - ph) * pps) < SNAP) dt = ph - d.start;
       const from = Math.max(0, Math.min(c0.from + dt, c0.to - minLen()));
       d.shift = from - c0.from;
-      host.preview(d.base.map((c) => (c.id === d.id ? { ...c, from } : c)));
+      host.preview(withClips(d.base.map((c) => (c.id === d.id ? { ...c, from } : c))));
     } else {
       const end = d.start + clipLength(c0) + dt;
       if (Math.abs((end - ph) * pps) < SNAP) dt = ph - (d.start + clipLength(c0));
       const to = Math.min(c0.video.duration, Math.max(c0.to + dt, c0.from + minLen()));
-      host.preview(d.base.map((c) => (c.id === d.id ? { ...c, to } : c)));
+      host.preview(withClips(d.base.map((c) => (c.id === d.id ? { ...c, to } : c))));
     }
     layoutWidth();
   }
 
+  /** Times a sound's edges catch on: the playhead, the start, clip edges, other sounds. */
+  function catches(id: number): number[] {
+    const list = clips();
+    const s = starts(list);
+    return [
+      0,
+      host.time(),
+      ...s,
+      total(),
+      ...sounds()
+        .filter((k) => k.id !== id)
+        .flatMap((k) => [k.at, k.at + soundLength(k)]),
+    ];
+  }
+  /** The nearest catch within reach of t, else t. */
+  function snapTo(t: number, at: number[]): number {
+    let best = t;
+    let d = SNAP / pps;
+    for (const a of at)
+      if (Math.abs(a - t) < d) {
+        d = Math.abs(a - t);
+        best = a;
+      }
+    return best;
+  }
+
+  function moveSoundTo(x: number) {
+    if (drag?.kind !== 'sound') return;
+    const d = drag;
+    if (!d.moved && Math.abs(x - d.x0) < 5) return;
+    d.moved = true;
+    canvas.style.cursor = 'grabbing';
+    const s0 = d.base.find((k) => k.id === d.id)!;
+    const len = soundLength(s0);
+    let at = Math.max(0, s0.at + (x - d.x0) / pps);
+    // either edge may catch
+    const near = catches(d.id);
+    const a = snapTo(at, near);
+    const b = snapTo(at + len, near) - len;
+    at = Math.max(0, Math.abs(a - at) <= Math.abs(b - at) ? a : b);
+    host.preview(withSounds(d.base.map((k) => (k.id === d.id ? { ...k, at } : k))));
+    layoutWidth();
+  }
+
+  function trimSoundTo(x: number) {
+    if (drag?.kind !== 'soundTrim') return;
+    const d = drag;
+    const s0 = d.base.find((k) => k.id === d.id)!;
+    const near = catches(d.id);
+    const dt = (x - d.x0) / pps;
+    let next: Sound;
+    if (d.side === 'from') {
+      const at = snapTo(s0.at + dt, near);
+      const from = Math.max(0, Math.min(s0.from + (at - s0.at), s0.to - minLen()));
+      next = { ...s0, from, at: s0.at + (from - s0.from) };
+    } else {
+      const end = snapTo(s0.at + soundLength(s0) + dt, near);
+      next = { ...s0, to: Math.min(s0.video.duration, Math.max(s0.from + minLen(), s0.from + (end - s0.at))) };
+    }
+    host.preview(withSounds(d.base.map((k) => (k.id === d.id ? next : k))));
+    layoutWidth();
+  }
+
   function autoscroll(x: number) {
-    if (!drag || drag.kind === 'press') return;
+    if (!drag || drag.kind === 'press' || (drag.kind === 'sound' && !drag.moved)) return;
     if (x < 30) scroller.scrollLeft -= 12;
     else if (x > viewW - 30) scroller.scrollLeft += 12;
   }
@@ -560,21 +784,49 @@ export function timeline(host: TimelineHost) {
   }).observe(scroller);
 
   // --- commands ---
+  const selectedSound = () => sounds().find((s) => s.id === selected) ?? null;
+  const selectedClip = () => clips().find((c) => c.id === selected) ?? null;
+
+  /** Cuts the selected sound if the playhead is on it, else the picture under the playhead. */
   function split() {
     const t = host.time();
+    const s = selectedSound();
+    if (s && t > s.at && t < s.at + soundLength(s)) {
+      const next = splitSound(sounds(), s.id, t, minLen());
+      if (!next) return;
+      host.commit(withSounds(next));
+      selected = next[next.findIndex((k) => k.id === s.id) + 1].id;
+      sync();
+      return;
+    }
     const next = splitClips(clips(), t, minLen());
     if (!next) return;
-    host.commit(next);
+    host.commit(withClips(next));
     // the part right of the cut
     selected = clipAt(next, t)?.clip.id ?? null;
     sync();
   }
 
+  function separateSelected() {
+    const c = selectedClip();
+    const next = c && separate(host.edit(), c.id);
+    if (!next) return;
+    host.commit(next);
+    selected = next.sounds[next.sounds.length - 1].id;
+    sync();
+  }
+
   function deleteSelected() {
+    if (selectedSound()) {
+      host.commit(withSounds(sounds().filter((s) => s.id !== selected)));
+      selected = null;
+      sync();
+      return;
+    }
     const list = clips();
     if (selected === null || !list.some((c) => c.id === selected)) return;
     const s = starts(list)[list.findIndex((c) => c.id === selected)];
-    host.commit(list.filter((c) => c.id !== selected));
+    host.commit(withClips(list.filter((c) => c.id !== selected)));
     selected = null;
     host.seek(Math.min(s, Math.max(0, duration(clips()) - minLen())));
     sync();
@@ -587,8 +839,7 @@ export function timeline(host: TimelineHost) {
   }
 
   function sync() {
-    const list = clips();
-    if (selected !== null && !list.some((c) => c.id === selected)) selected = null;
+    if (!selectedClip() && !selectedSound()) selected = null;
     if (fitMode && !drag) pps = fitPps();
     layoutWidth();
     syncZoom();
@@ -599,8 +850,12 @@ export function timeline(host: TimelineHost) {
     undoBtn.disabled = !host.canUndo();
     redoBtn.disabled = !host.canRedo();
     deleteBtn.disabled = selected === null;
+    const c = selectedClip();
+    separateBtn.disabled = !c || c.muted || soundOf(c.video) === null;
     schedule();
   }
+  // waveforms show up as the sound gets read
+  onSound(() => sync());
 
   return {
     el: root,

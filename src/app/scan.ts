@@ -84,7 +84,7 @@ export function scanPanel() {
     const p = current();
     if (!p || opts.soundPieces) return;
     const known = printed.get(p.id);
-    if (known) opts.soundPieces = known.pieces;
+    if (known?.pieces.length) opts.soundPieces = known.pieces;
   }
 
   // --- view: player + frame strip ---
@@ -139,7 +139,7 @@ export function scanPanel() {
   const soundToggle = toggleRow('Sound', () => opts.sound, (v) => ((opts.sound = v), changed()));
   const soundPicker = filePicker('video/*', false, (f) => {
     const p = current();
-    opts.soundPieces = [{ file: f[0], start: p?.payload.start ?? 0, length: Infinity }];
+    opts.soundPieces = [{ file: f[0], start: p?.payload.start ?? 0, length: Infinity, at: 0 }];
     opts.sound = true;
     changed();
   });

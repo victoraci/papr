@@ -60,5 +60,5 @@ show();
 // dev hook so the flow can be driven without a file dialog
 if (import.meta.env.DEV)
   Object.assign(window, {
-    papr: { openVideo: print.open, addVideos: print.addVideos, clips: print.clips, addScans: scan.add, state: print.state, go: (r: Route) => (location.hash = `#/${r}`) },
+    papr: { openVideo: print.open, addVideos: print.addVideos, clips: print.clips, edit: print.edit, addScans: scan.add, state: print.state, go: (r: Route) => (location.hash = `#/${r}`) },
   });

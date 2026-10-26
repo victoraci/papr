@@ -102,9 +102,9 @@ export async function exportPngZip(job: ExportJob, name: string): Promise<Blob> 
 }
 
 /**
- * The original sound of the printed edit: the pieces one after another, cut
- * to `duration` and repeated `times`. Videos without readable sound stay
- * silent for their part.
+ * The original sound of the printed edit: every piece at its place on the
+ * timeline, overlaps mixed, cut to `duration` and repeated `times`. Videos
+ * without readable sound stay silent for their part.
  */
 export async function cutSound(pieces: SoundPiece[], duration: number, times: number): Promise<AudioBuffer> {
   const rate = 48000;
@@ -117,16 +117,18 @@ export async function cutSound(pieces: SoundPiece[], duration: number, times: nu
 
   const len = Math.max(1, Math.round(duration * rate));
   const once = [new Float32Array(len), new Float32Array(len)];
-  let at = 0;
+  // pieces that overlap on the timeline are mixed
   for (const p of pieces) {
-    if (at >= len) break;
-    const n = Math.min(len - at, Number.isFinite(p.length) ? Math.round(p.length * rate) : len);
     const full = decoded.get(p.file);
-    if (full) {
-      const from = Math.min(full.length, Math.round(p.start * rate));
-      for (let c = 0; c < 2; c++) once[c].set(full.getChannelData(Math.min(c, full.numberOfChannels - 1)).subarray(from, from + n), at);
+    const at = Math.round(p.at * rate);
+    if (!full || at >= len) continue;
+    const from = Math.min(full.length, Math.round(p.start * rate));
+    const n = Math.min(len - at, full.length - from, Number.isFinite(p.length) ? Math.round(p.length * rate) : len);
+    for (let c = 0; c < 2; c++) {
+      const src = full.getChannelData(Math.min(c, full.numberOfChannels - 1));
+      const dst = once[c];
+      for (let i = 0; i < n; i++) dst[at + i] += src[from + i];
     }
-    at += n;
   }
   const out = new AudioBuffer({ length: len * times, numberOfChannels: 2, sampleRate: rate });
   for (let c = 0; c < 2; c++) for (let t = 0; t < times; t++) out.getChannelData(c).set(once[c], t * len);

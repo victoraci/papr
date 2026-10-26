@@ -23,7 +23,7 @@ import { buildSheetsPdf, pageCount } from '../core/pdf.ts';
 import type { SheetStyle } from '../core/sheet.ts';
 import { renderSheetSvg } from './preview.ts';
 import { printed } from './session.ts';
-import { clipLength, frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, type Clip } from './sequence.ts';
+import { frameAt, frameCount as countFrames, history, insert, newClip, sequenceGrabber, setCrop, soundPieces, type Clip, type Edit } from './sequence.ts';
 import { timeline } from './timeline.ts';
 import { dropTarget, el, field, filePicker, group, hint, mb, more, options, plural, saveFile, sidebar, steps, toggleRow, type Control } from './ui.ts';
 import { loadVideo } from './video.ts';
@@ -68,8 +68,9 @@ export function printPanel() {
   let last: { key: string; url: string; name: string } | null = null;
   /** The edit, with undo. While a clip edge is dragged, `draft` shows the edit in progress. */
   const edit = history();
-  let draft: Clip[] | null = null;
-  const clips = () => draft ?? edit.get();
+  let draft: Edit | null = null;
+  const current = () => draft ?? edit.get();
+  const clips = () => current().clips;
 
   // --- derived ---
   const aspect = () => {
@@ -108,11 +109,11 @@ export function printPanel() {
 
   // --- view: video or sheets ---
   const view = videoView({
-    clips,
+    edit: current,
     fps: () => state.fps,
     aspect,
     onCrop(id, x, y, done) {
-      const next = setCrop(edit.get(), id, x, y);
+      const next = { ...edit.get(), clips: setCrop(edit.get().clips, id, x, y) };
       draft = done ? null : next;
       if (done) edit.push(next);
       if (done) changed('video');
@@ -121,7 +122,7 @@ export function printPanel() {
     onPlay: () => tl.sync(),
   });
   const tl = timeline({
-    clips,
+    edit: current,
     fps: () => state.fps,
     commit(next) {
       draft = null;
@@ -201,7 +202,7 @@ export function printPanel() {
     () => state.crop,
     (v) => {
       state.crop = v;
-      edit.replace(edit.get().map((c) => ({ ...c, cropX: 0.5, cropY: 0.5 })));
+      edit.replace({ ...edit.get(), clips: edit.get().clips.map((c) => ({ ...c, cropX: 0.5, cropY: 0.5 })) });
       view.refresh();
       changed('video');
     },
@@ -290,7 +291,7 @@ export function printPanel() {
 
   /** New videos go to the end of the edit, or where they were dropped on the timeline. */
   async function addVideos(files: File[], at?: number) {
-    const first = !edit.get().length;
+    const first = !edit.get().clips.length;
     const note = first ? intakeNote : fileNote;
     note.className = 'hint';
     note.textContent = files.length > 1 ? `Opening ${files.length} videos…` : 'Opening…';
@@ -306,7 +307,8 @@ export function printPanel() {
     note.className = errors.length ? 'warn' : 'hint';
     note.textContent = errors.join(' ');
     if (!added.length) return;
-    const next = insert(edit.get(), at ?? edit.get().length, added);
+    const now = edit.get();
+    const next = { ...now, clips: insert(now.clips, at ?? now.clips.length, added) };
     if (first) {
       edit.reset(next);
       state.crop = 'original';
@@ -434,12 +436,21 @@ export function printPanel() {
     if (state.view === 'sheets') void renderPreview();
   }
 
+  /** What the Scan side needs to put the sound back under the scans. */
+  function remember(id: string) {
+    const pieces = soundPieces(edit.get()).map((p) => ({ file: p.video.file, start: p.from, length: p.to - p.from, at: p.at }));
+    printed.set(id, { pieces });
+  }
+
   async function createPdf() {
-    const list = edit.get();
+    const list = edit.get().clips;
     const s = spec();
     if (!list.length || validateSpec(s) || state.busy) return;
     const key = pdfKey();
-    if (last?.key === key) return saveFile(last.url, last.name);
+    if (last?.key === key) {
+      remember(state.projectId); // the sound may have changed since
+      return saveFile(last.url, last.name);
+    }
     // a new PDF is a new project, so sheets of two runs can't get mixed up
     if (last) {
       state.projectId = newProjectId();
@@ -459,8 +470,8 @@ export function printPanel() {
         fps: state.fps,
         frameCount: n,
         title: title(),
-        // the QR code can only say where one uncut piece starts in its video
-        start: list.length === 1 ? list[0].from : undefined,
+        // the QR code can only say where one uncut piece with its own sound starts in its video
+        start: list.length === 1 && !list[0].muted && !edit.get().sounds.length ? list[0].from : undefined,
         getFrame: (i) => grab.jpeg(i),
         onProgress: (done, total) => (download.textContent = `Preparing frame ${done} of ${total}`),
       });
@@ -468,7 +479,7 @@ export function printPanel() {
       last = { key, url: URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/pdf' })), name: `papr-${id}.pdf` };
       saveFile(last.url, last.name);
       pdfNote.textContent = `${last.name} · ${mb(bytes.length)}. Print at 100 % or fit to page.`;
-      printed.set(id, { pieces: list.map((c) => ({ file: c.video.file, start: c.from, length: clipLength(c) })) });
+      remember(id);
     } catch (e) {
       pdfNote.className = 'warn';
       pdfNote.textContent = e instanceof Error ? e.message : String(e);
@@ -481,5 +492,5 @@ export function printPanel() {
 
   const page = el('section', { class: 'page' }, intake, work);
   dropTarget(page, 'video/*', true, (f) => void addVideos(f));
-  return { el: page, open: (f: File) => addVideos([f]), addVideos, state, clips };
+  return { el: page, open: (f: File) => addVideos([f]), addVideos, state, clips, edit: current };
 }
